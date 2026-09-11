@@ -1,4 +1,5 @@
 import { locEnd, locStart, parse } from './parser';
+import { printer } from './printer';
 
 export const languages = [
   {
@@ -20,9 +21,9 @@ export const parsers = {
   },
 };
 
-/* No printer yet: the v1 printer is gone and v2 lands in phase 4 of REWRITE-PLAN.md.
- * Formatting therefore fails with "no printer for handlebars-ast" until then, by design. */
-export const printers = {};
+export const printers = {
+  'handlebars-ast': printer,
+};
 
 /* Opinionated formatter - prettier's core options only. */
 export const options = {};

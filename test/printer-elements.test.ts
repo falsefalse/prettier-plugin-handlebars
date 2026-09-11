@@ -1,0 +1,119 @@
+import { describe, expect, it } from 'vitest';
+import prettier from 'prettier';
+import * as plugin from '../src/plugin';
+
+async function format(source: string, printWidth = 80): Promise<string> {
+  return prettier.format(source, { parser: 'handlebars', plugins: [plugin as never], printWidth });
+}
+
+async function expectStable(source: string, expected: string, printWidth = 80): Promise<void> {
+  const first = await format(source, printWidth);
+  expect(first).toBe(expected);
+  expect(await format(first, printWidth)).toBe(first);
+}
+
+describe('tags', () => {
+  it.each([
+    ['<div></div>', '<div></div>\n'],
+    ['<img src="a.png">', '<img src="a.png">\n'],
+    ['<input disabled>', '<input disabled>\n'],
+    ['<x-widget a="1" />', '<x-widget a="1" />\n'],
+    ['<input type="text" class="a b" id="x" disabled>', '<input type="text" class="a b" id="x" disabled>\n'],
+  ])('keeps a fitting tag on one line: %j', async (source, expected) => {
+    await expectStable(source, expected);
+  });
+
+  /* One group for the whole tag. Grouping the attributes separately would let them fit while
+   * the `>` alone drops down, which reads as a stray bracket. */
+  it('breaks every attribute at once, with the closing bracket hugging the child', async () => {
+    await expectStable(
+      '<a role="tab" href="#{{this.id}}" data-target-sel="#{{this.id}}" aria-selected>{{this.label}}</a>',
+      '<a\n  role="tab"\n  href="#{{this.id}}"\n  data-target-sel="#{{this.id}}"\n  aria-selected\n>{{this.label}}</a>\n',
+    );
+  });
+
+  it('never leaves the closing bracket alone on a line', async () => {
+    const output = await format('<button class="btn btn-primary disconnect-perk">{{label}}</button>', 40);
+
+    /* `>{{label}}</button>` is fine; a line holding nothing but `>` is the stray-bracket shape. */
+    expect(output).not.toMatch(/^\s*>\s*$/m);
+    expect(output).toBe('<button\n  class="btn btn-primary disconnect-perk"\n>{{label}}</button>\n');
+  });
+
+  it('picks the quote that avoids escaping', async () => {
+    await expectStable('<div title=\'He said "hi"\'></div>', '<div title=\'He said "hi"\'></div>\n');
+  });
+
+  it('honours singleQuote for attribute values', async () => {
+    const output = await prettier.format('<div title="x"></div>', {
+      parser: 'handlebars',
+      plugins: [plugin as never],
+      singleQuote: true,
+    });
+
+    expect(output).toBe("<div title='x'></div>\n");
+  });
+});
+
+/* The governing rule again, now across a tag boundary. */
+describe('element children keep the author\'s whitespace', () => {
+  it.each([
+    ['<div><span>x</span></div>', '<div><span>x</span></div>\n'],
+    ['<div> <span>x</span> </div>', '<div> <span>x</span> </div>\n'],
+    ['<div>\n  <span>x</span>\n</div>', '<div>\n  <span>x</span>\n</div>\n'],
+    ['<a href="/x"><i class="icon"></i></a>', '<a href="/x"><i class="icon"></i></a>\n'],
+    ['<div>\n</div>', '<div>\n</div>\n'],
+  ])('%j', async (source, expected) => {
+    await expectStable(source, expected);
+  });
+
+  it('indents nested elements without the closing tags drifting', async () => {
+    const source = '<div>\n  <div>\n    <div>\n      <span>x</span>\n    </div>\n  </div>\n</div>';
+
+    await expectStable(source, `${source}\n`);
+  });
+
+  it('collapses runs of spaces inside text but keeps a gap a gap', async () => {
+    await expectStable('<p>  hello  world  </p>', '<p> hello world </p>\n');
+  });
+});
+
+describe('attribute values', () => {
+  it('reproduces the value text exactly, formatting only the mustaches in it', async () => {
+    await expectStable('<a href="/bills/{{bill_id}}/edit">x</a>', '<a href="/bills/{{bill_id}}/edit">x</a>\n');
+  });
+
+  it('wraps a call in a value that does not fit, since mustache whitespace does not render', async () => {
+    const output = await format('<a title="{{t \'k\' billed=amount currency=symbol}}">x</a>', 40);
+
+    expect(output.split('\n').every((line) => line.length <= 40)).toBe(true);
+    expect(output).toContain("{{t\n");
+  });
+});
+
+describe('partials and decorators', () => {
+  it.each([
+    ['{{> partials/thing}}', '{{> partials/thing}}\n'],
+    ['{{> partials/thing param=1}}', '{{> partials/thing param=1}}\n'],
+    ['{{> (lookup . "name") data=this}}', '{{> (lookup . "name") data=this}}\n'],
+    ['{{*inline "x"}}', '{{*inline "x"}}\n'],
+    ['{{~*log value~}}', '{{~*log value~}}\n'],
+  ])('%j', async (source, expected) => {
+    await expectStable(source, expected);
+  });
+});
+
+describe('recovery', () => {
+  /* Left in the raw text, a trailing newline is reprinted *and* re-added as the file's line
+   * ending, so the file grows by one newline on every pass. */
+  it('is idempotent on unclosed constructs', async () => {
+    await expectStable('{{{{raw}}}}<div>{{ notParsed }}</div>', '{{{{raw}}}}<div>{{ notParsed }}</div>\n');
+    await expectStable('{{#> layout}}\n  <main>{{body}}</main>', '{{#> layout}}\n  <main>{{body}}</main>\n');
+  });
+});
+
+describe('coverage boundary', () => {
+  it('still reports blocks as unhandled', async () => {
+    await expect(format('{{#if a}}x{{/if}}')).rejects.toThrow(/does not handle BlockStatement yet/);
+  });
+});
