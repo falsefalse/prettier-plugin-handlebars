@@ -40,6 +40,13 @@ describe('tags', () => {
     expect(output).toBe('<button\n  class="btn btn-primary disconnect-perk"\n>{{label}}</button>\n');
   });
 
+  /* `parseDynamicAttribute` assembles `data-{{x}}` on its own; a later merge step could not tell
+   * that apart from two attributes with a space between them, and glued those together too. */
+  it('keeps a trailing-dash attribute separate from the mustache after it', async () => {
+    await expectStable('<div data- {{key}}>x</div>', '<div data- {{key}}>x</div>\n');
+    await expectStable('<span data-{{ control.badge }}></span>', '<span data-{{ control.badge }}></span>\n');
+  });
+
   it('picks the quote that avoids escaping', async () => {
     await expectStable('<div title=\'He said "hi"\'></div>', '<div title=\'He said "hi"\'></div>\n');
   });

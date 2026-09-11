@@ -189,10 +189,8 @@ function parseChildren(
       }
 
       if (shouldPreserveMustacheVerbatim(token) && !(endBlock && token.kind === 'else')) {
-        const preserveEnd =
-          token.kind === 'blockStart' ? consumeUnsupportedBlock(text, pos, token) : token.end;
-        nodes.push(createUnmatchedNode(text, pos, preserveEnd));
-        pos = preserveEnd;
+        nodes.push(createUnmatchedNode(text, pos, token.end));
+        pos = token.end;
         continue;
       }
 
@@ -216,14 +214,18 @@ function parseChildren(
           continue;
         }
 
-        if (ignoreDirective === 'next' || ignoreDirective === 'attribute') {
-          const ignoreStart = pos;
-          const afterComment = token.end;
-          const ignoredEnd = consumeNextNode(text, afterComment);
-          const finalIgnoredEnd = ignoredEnd > afterComment ? ignoredEnd : text.length;
+        if (ignoreDirective === 'next') {
+          const ignoredEnd = consumeNextNode(text, token.end);
 
-          nodes.push(createUnmatchedNode(text, ignoreStart, finalIgnoredEnd));
-          pos = finalIgnoredEnd;
+          /* Nothing follows to ignore, so the directive is only a comment. */
+          if (ignoredEnd <= token.end) {
+            nodes.push(createComment(token.rawContent, rangeOffset + pos, rangeOffset + token.end));
+            pos = token.end;
+            continue;
+          }
+
+          nodes.push(createUnmatchedNode(text, pos, ignoredEnd));
+          pos = ignoredEnd;
           continue;
         }
       }
@@ -440,8 +442,13 @@ function parseChildren(
 }
 
 function hasMatchingBlockEnd(text: string, token: MustacheToken, start: number): boolean {
+  return findMatchingBlockEnd(text, token, start) !== null;
+}
+
+/** Where the block opened by `token` closes, or null if it never does. */
+function findMatchingBlockEnd(text: string, token: MustacheToken, start: number): number | null {
   if (!token.name) {
-    return false;
+    return null;
   }
 
   let depth = 0;
@@ -450,7 +457,7 @@ function hasMatchingBlockEnd(text: string, token: MustacheToken, start: number):
   while (pos < text.length) {
     const next = findNextHandlebarsOpen(text, pos);
     if (next === -1) {
-      return false;
+      return null;
     }
 
     const candidate = parseMustacheToken(text, next);
@@ -459,7 +466,7 @@ function hasMatchingBlockEnd(text: string, token: MustacheToken, start: number):
       depth += 1;
     } else if (candidate.kind === 'blockEnd' && candidate.name === token.name) {
       if (depth === 0) {
-        return true;
+        return candidate.end;
       }
 
       depth -= 1;
@@ -468,7 +475,7 @@ function hasMatchingBlockEnd(text: string, token: MustacheToken, start: number):
     pos = candidate.end > next ? candidate.end : next + 2;
   }
 
-  return false;
+  return null;
 }
 
 function parseBlock(
@@ -575,7 +582,6 @@ function parseBlock(
       inverse: inverseBody,
       ...(inverseTrimOpen ? { inverseTrimOpen } : {}),
       ...(inverseTrimClose ? { inverseTrimClose } : {}),
-      rawOpen: token.content,
       blockPrefix,
       trimOpen: token.trimOpen,
       trimClose: token.trimClose,
@@ -602,28 +608,24 @@ function hasMatchingTagEnd(text: string, tag: string, start: number, limit = -1)
   return findMatchingTagClose(text, tag, start, limit) !== null;
 }
 
-type PrettierIgnoreDirective = 'next' | 'start' | 'end' | 'attribute' | null;
+type PrettierIgnoreDirective = 'next' | 'start' | 'end' | null;
 
+/**
+ * The directive has to *be* the comment, not appear somewhere inside it. Matching on `includes`
+ * meant a comment that merely mentioned `prettier-ignore` silently stopped the next node from
+ * being formatted - and a mention of `prettier-ignore-start` opened a region.
+ */
 function getPrettierIgnoreDirective(rawContent: string): PrettierIgnoreDirective {
-  const normalized = rawContent.toLowerCase();
-
-  if (normalized.includes('prettier-ignore-start')) {
-    return 'start';
+  switch (rawContent.toLowerCase().replace(/^\s*!(?:-{2})?/u, '').trim()) {
+    case 'prettier-ignore-start':
+      return 'start';
+    case 'prettier-ignore-end':
+      return 'end';
+    case 'prettier-ignore':
+      return 'next';
+    default:
+      return null;
   }
-
-  if (normalized.includes('prettier-ignore-end')) {
-    return 'end';
-  }
-
-  if (normalized.includes('prettier-ignore-attribute')) {
-    return 'attribute';
-  }
-
-  if (normalized.includes('prettier-ignore')) {
-    return 'next';
-  }
-
-  return null;
 }
 
 function findPrettierIgnoreEnd(text: string, position: number): number | null {
@@ -649,6 +651,16 @@ function findPrettierIgnoreEnd(text: string, position: number): number | null {
   return null;
 }
 
+/**
+ * How far `{{! prettier-ignore }}` reaches: to the end of the one node that follows it, or
+ * nowhere if that node's extent cannot be determined.
+ *
+ * It scans rather than parses. Parsing meant a nested `parseChildren` ran past the enclosing
+ * container - handing an element its own `</div>`, or a block its own `{{/if}}` - and meant this
+ * could `fail()`, so a directive meant to suppress formatting could reject the file instead.
+ * Returning `position` says "nothing to ignore"; the caller then treats the directive as a plain
+ * comment and the markup after it is parsed, and reported on, as usual.
+ */
 function consumeNextNode(text: string, position: number): number {
   if (position >= text.length) {
     return position;
@@ -657,23 +669,32 @@ function consumeNextNode(text: string, position: number): number {
   if (startsTemplateTag(text, position)) {
     const token = parseMustacheToken(text, position);
 
-    if (token.kind === 'blockStart') {
-      const { next } = parseBlock(text, token);
-      return next;
+    /* A terminator belongs to whatever opened it, never to the node being skipped. */
+    if (token.kind === 'blockEnd' || token.kind === 'else') {
+      return position;
     }
 
-    return token.end;
+    return token.kind === 'blockStart' ? findMatchingBlockEnd(text, token, position) ?? position : token.end;
   }
 
   if (text[position] === '<') {
     const tagResult = parseTag(text, position);
 
-    if (tagResult.kind === 'open') {
-      const { position: afterChildren } = parseChildren(text, tagResult.end, tagResult.tag, null);
-      return afterChildren;
+    if (!tagResult.terminated || tagResult.kind === 'close') {
+      return position;
     }
 
-    return tagResult.end;
+    if (tagResult.kind === 'selfClosing') {
+      return tagResult.end;
+    }
+
+    const closeStart = findMatchingTagClose(text, tagResult.tag, tagResult.end);
+    if (closeStart === null) {
+      return position;
+    }
+
+    const closeEnd = text.indexOf('>', closeStart);
+    return closeEnd < 0 ? position : closeEnd + 1;
   }
 
   const nextMarkup = findNextMarkup(text, position);
@@ -682,8 +703,10 @@ function consumeNextNode(text: string, position: number): number {
     return nextMarkup;
   }
 
-  if (nextMarkup >= text.length) {
-    return text.length;
+  /* Only whitespace is stepped over on the way to the node being ignored - a run of text is a
+   * node in its own right, and is the thing to ignore. */
+  if (text.slice(position, nextMarkup).trim() !== '' || nextMarkup >= text.length) {
+    return nextMarkup;
   }
 
   return consumeNextNode(text, nextMarkup);
@@ -714,13 +737,23 @@ function parseTag(text: string, position: number):
   const { value: tag, next } = readName(text, pos);
   pos = next;
   const attributes: ElementAttribute[] = [];
+  let glued = false;
+
+  /* Whether the author left a space before this attribute. The first one always needs one, or it
+   * would run into the tag name. */
+  const add = (attribute: ElementAttribute) => {
+    attributes.push(glued && attributes.length > 0 ? { ...attribute, glued: true } : attribute);
+  };
 
   while (pos < text.length) {
     skipWhitespace(text, () => pos++, () => pos);
+    /* Look at the character before the attribute rather than at whether whitespace was skipped
+     * here: some of the attribute readers consume their own trailing space. */
+    glued = pos > 0 && !/\s/u.test(text[pos - 1]);
 
     const dynamicAttribute = parseDynamicAttribute(text, pos);
     if (dynamicAttribute) {
-      attributes.push(dynamicAttribute.attribute);
+      add(dynamicAttribute.attribute);
       pos = dynamicAttribute.position;
       continue;
     }
@@ -728,9 +761,9 @@ function parseTag(text: string, position: number):
     if (startsTemplateTag(text, pos)) {
       const token = parseMustacheToken(text, pos);
 
-      // комментарий в голове тега
+      // a comment in attribute position
       if (token.kind === 'comment') {
-        attributes.push({
+        add({
           type: 'AttributeBlock',
           block: createComment(token.rawContent, pos, token.end),
         });
@@ -738,9 +771,9 @@ function parseTag(text: string, position: number):
         continue;
       }
 
-      // partial в голове тега
+      // a partial in attribute position
       if (token.kind === 'partial') {
-        attributes.push({
+        add({
           type: 'AttributeBlock',
           block: createPartial(token.content, token.trimOpen, token.trimClose, pos, token.end, contentOffset(text, pos, token.end, token.content)),
         });
@@ -750,7 +783,7 @@ function parseTag(text: string, position: number):
 
       // standalone decorator in the opening tag
       if (token.specialForm === 'decorator') {
-        attributes.push({
+        add({
           type: 'AttributeBlock',
           block: createDecorator(
             token.content.slice(1).trim(),
@@ -765,9 +798,9 @@ function parseTag(text: string, position: number):
         continue;
       }
 
-      // обычный {{ mustache }}
+      // a plain {{ mustache }}
       if (token.kind === 'mustache') {
-        attributes.push({
+        add({
           type: 'AttributeBlock',
           block: createMustache(token.content, token.triple, token.trimOpen, token.trimClose, pos, token.end, contentOffset(text, pos, token.end, token.content)),
         });
@@ -775,11 +808,11 @@ function parseTag(text: string, position: number):
         continue;
       }
 
-      // {{#block}} ... {{/block}} в голове тега
+      // {{#block}} ... {{/block}} in attribute position
       if (token.kind === 'blockStart') {
         if (!hasMatchingBlockEnd(text, token, pos)) {
-          // нет закрытия — считаем unmatched-куском
-          attributes.push({
+          // no close, so keep it as an unmatched fragment
+          add({
             type: 'AttributeBlock',
             block: createMustache(token.content, token.triple, token.trimOpen, token.trimClose, pos, token.end, contentOffset(text, pos, token.end, token.content)),
           });
@@ -788,7 +821,7 @@ function parseTag(text: string, position: number):
         }
 
         const { node, next } = parseBlock(text, token);
-        attributes.push({
+        add({
           type: 'AttributeBlock',
           block: node,
         });
@@ -796,8 +829,8 @@ function parseTag(text: string, position: number):
         continue;
       }
 
-      // else / blockEnd в голове тега — странный случай, но не ломаемся
-      attributes.push({
+      // else / blockEnd in attribute position: odd, but not worth failing over
+      add({
         type: 'AttributeBlock',
         block: createMustache(token.content, token.triple, token.trimOpen, token.trimClose, pos, token.end, contentOffset(text, pos, token.end, token.content)),
       });
@@ -807,14 +840,12 @@ function parseTag(text: string, position: number):
 
     if (text[pos] === '/' && text[pos + 1] === '>') {
       pos += 2;
-      const normalizedAttributes = normalizeTagAttributes(attributes);
-      return { kind: 'selfClosing', tag, attributes: normalizedAttributes, end: pos, terminated: true };
+      return { kind: 'selfClosing', tag, attributes, end: pos, terminated: true };
     }
     if (text[pos] === '>') {
       pos += 1;
       const kind = voidElements.has(tag.toLowerCase()) ? 'selfClosing' : 'open';
-      const normalizedAttributes = normalizeTagAttributes(attributes);
-      return { kind, tag, attributes: normalizedAttributes, end: pos, terminated: true };
+      return { kind, tag, attributes, end: pos, terminated: true };
     }
 
     const beforeAttr = pos;
@@ -825,7 +856,7 @@ function parseTag(text: string, position: number):
       continue;
     }
 
-    attributes.push(attr.attribute);
+    add(attr.attribute);
     pos = attr.position;
 
     if (pos <= beforeAttr) {
@@ -834,8 +865,7 @@ function parseTag(text: string, position: number):
   }
 
   const kind = voidElements.has(tag.toLowerCase()) ? 'selfClosing' : 'open';
-  const normalizedAttributes = normalizeTagAttributes(attributes);
-  return { kind, tag, attributes: normalizedAttributes, end: pos, terminated: false };
+  return { kind, tag, attributes, end: pos, terminated: false };
 }
 
 function consumeInvalidVoidElementClose(text: string, position: number, tag: string): number | null {
@@ -871,7 +901,7 @@ function parseAttribute(text: string, position: number): { attribute: ElementAtt
 
   skipWhitespace(text, () => pos++, () => pos);
 
-  // boolean-атрибут: без "="
+  // a boolean attribute: no "="
   if (text[pos] !== '=') {
     return { attribute: createAttribute(name, null), position: pos };
   }
@@ -909,18 +939,19 @@ function parseAttribute(text: string, position: number): { attribute: ElementAtt
       pos += 1;
     }
     rawValue = text.slice(start, pos);
+
+    /* Only an unquoted value can hold both quote characters - a quoted one would have ended at
+     * the first matching delimiter - and there is then no quote left to wrap it in. It used to
+     * come back as `title='a"b'c'`, which HTML reads as two attributes. */
+    if (rawValue.includes('"') && rawValue.includes("'")) {
+      fail('unquoted attribute value cannot contain both quote characters', start, pos);
+    }
   }
 
-  if (shouldPreserveRawAttribute(name, rawValue)) {
-    return { attribute: createRawAttribute(text.slice(attrStart, pos)), position: pos };
-  }
 
   return { attribute: createAttribute(name, rawValue, valueStart), position: pos };
 }
 
-function shouldPreserveRawAttribute(name: string, rawValue: string): boolean {
-  return rawValue.includes('\n') && (name.startsWith('data-for-') || rawValue.includes('&quot;'));
-}
 
 function parseDynamicAttribute(
   text: string,
@@ -1021,6 +1052,7 @@ function createAttribute(name: string, rawValue: string | null, valueStart?: num
       {
         type: 'AttributeValue' as const,
         parts,
+        raw: rawValue,
       },
       valueStart,
       typeof valueStart === 'number' ? valueStart + rawValue.length : undefined,
@@ -1035,62 +1067,6 @@ function createRawAttribute(raw: string): ElementAttribute {
   };
 }
 
-function normalizeTagAttributes(attributes: ElementAttribute[]): ElementAttribute[] {
-  const normalized: ElementAttribute[] = [];
-
-  for (let index = 0; index < attributes.length; index += 1) {
-    const current = attributes[index];
-    const next = attributes[index + 1];
-
-    if (
-      current?.type === 'Attribute' &&
-      current.value == null &&
-      current.name.endsWith('-') &&
-      next?.type === 'AttributeBlock' &&
-      next.block.type === 'MustacheStatement'
-    ) {
-      normalized.push(createRawAttribute(`${current.name}${stringifyMustacheForAttribute(next.block)}`));
-      index += 1;
-      continue;
-    }
-
-    normalized.push(current);
-  }
-
-  return normalized;
-}
-
-function stringifyMustacheForAttribute(node: MustacheStatement): string {
-  const pieces: string[] = [];
-
-  if (node.path.source) {
-    pieces.push(node.path.source);
-  }
-
-  if (node.params.length > 0) {
-    pieces.push(...node.params.map((param) => param.source));
-  }
-
-  if (node.hash.length > 0) {
-    pieces.push(...node.hash.map((pair) => `${pair.key}=${pair.value.source}`));
-  }
-
-  if (node.blockParams && node.blockParams.length > 0) {
-    pieces.push('as', `|${node.blockParams.join(' ')}|`);
-  }
-
-  const content = pieces.join(' ');
-  const open = node.triple ? '{{{' : '{{';
-  const close = node.triple ? '}}}' : '}}';
-  const trimOpen = node.trimOpen ? '~' : '';
-  const trimClose = node.trimClose ? '~' : '';
-  const isSimpleValue = node.params.length === 0 && node.hash.length === 0 && (!node.blockParams || node.blockParams.length === 0);
-  const openPadding = content.length > 0 && isSimpleValue ? ' ' : '';
-  const closePadding = content.length > 0 && isSimpleValue ? ' ' : node.trimClose && /\s/.test(content) ? ' ' : '';
-
-  return `${open}${trimOpen}${openPadding}${content}${closePadding}${trimClose}${close}`;
-}
-
 function parseAttributeValueParts(
   value: string,
   rangeOffset = 0,
@@ -1102,7 +1078,7 @@ function parseAttributeValueParts(
     if (startsTemplateTag(value, pos)) {
       const token = parseMustacheToken(value, pos);
 
-      // комментарий
+      // a comment
       if (token.kind === 'comment') {
         parts.push(createComment(token.rawContent, rangeOffset + pos, rangeOffset + token.end));
         pos = token.end;
@@ -1131,7 +1107,7 @@ function parseAttributeValueParts(
         continue;
       }
 
-      // обычный mustache
+      // a plain mustache
       if (token.kind === 'mustache') {
         parts.push(
           createMustache(token.content, token.triple, token.trimOpen, token.trimClose, rangeOffset + pos, rangeOffset + token.end, rangeOffset + contentOffset(value, pos, token.end, token.content)),
@@ -1140,10 +1116,10 @@ function parseAttributeValueParts(
         continue;
       }
 
-      // блок {{#if ...}} ... {{/if}}
+      // a block, {{#if ...}} ... {{/if}}
       if (token.kind === 'blockStart') {
         if (!hasMatchingBlockEnd(value, token, pos)) {
-          // не нашли закрытие — считаем текстом, чтобы не упасть
+          // no close found, so keep it as text rather than fail
           parts.push(
             withRange(
               { type: 'TextNode', chars: value.slice(pos, token.end) } as TextNode,
@@ -1161,7 +1137,7 @@ function parseAttributeValueParts(
         continue;
       }
 
-      // else / blockEnd — странные, но не ломаемся
+      // else / blockEnd: odd, but not worth failing over
       parts.push(
         withRange(
           { type: 'TextNode', chars: value.slice(pos, token.end) } as TextNode,
@@ -1292,11 +1268,6 @@ function findCurrentBlockBoundary(text: string, position: number, endBlock: stri
 
     const token = parseMustacheToken(text, next);
 
-    if (token.kind === 'blockStart' && shouldPreserveMustacheVerbatim(token)) {
-      pos = consumeUnsupportedBlock(text, next, token);
-      continue;
-    }
-
     if (token.kind === 'blockStart') {
       depth += 1;
     } else if (token.kind === 'blockEnd') {
@@ -1395,74 +1366,21 @@ function shouldPreserveMustacheVerbatim(token: MustacheToken): boolean {
   return templateDialect.shouldPreserveTokenVerbatim(token);
 }
 
-function consumeUnsupportedBlock(text: string, position: number, openToken: MustacheToken): number {
-  if (!openToken.name) {
-    return openToken.end;
-  }
-
-  let depth = 1;
-  let pos = openToken.end;
-
-  while (pos < text.length) {
-    const next = findNextHandlebarsOpen(text, pos);
-    if (next === -1) {
-      return text.length;
-    }
-
-    const token = parseMustacheToken(text, next);
-
-    if (token.kind === 'blockStart' && token.name === openToken.name) {
-      depth += 1;
-    } else if (token.kind === 'blockEnd' && token.name === openToken.name) {
-      depth -= 1;
-      if (depth === 0) {
-        return token.end;
-      }
-    }
-
-    pos = token.end > next ? token.end : next + 2;
-  }
-
-  return text.length;
-}
-
+/**
+ * Raw text ends at the first `</tag`, whatever it appears to sit inside.
+ *
+ * A browser's tokenizer does not parse the script or style body looking for string literals -
+ * that is exactly why `"<\\/script>"` has to be escaped in JS. Tracking quotes here instead made
+ * an apostrophe in a comment hide the closing tag.
+ */
 function findRawTextClose(text: string, position: number, tag: string): number {
-  const normalizedTag = tag.toLowerCase();
+  const needle = `</${tag.toLowerCase()}`;
 
-  if (normalizedTag === 'pre' || normalizedTag === 'textarea') {
-    return text.toLowerCase().indexOf(`</${normalizedTag}`, position);
-  }
-
-  let quote: '"' | "'" | '`' | null = null;
-  let escaped = false;
-
-  for (let index = position; index < text.length; index += 1) {
-    const char = text[index];
-
-    if (quote) {
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-
-      if (char === '\\') {
-        escaped = true;
-        continue;
-      }
-
-      if (char === quote) {
-        quote = null;
-      }
-
-      continue;
-    }
-
-    if (char === '"' || char === "'" || char === '`') {
-      quote = char;
-      continue;
-    }
-
-    if (text.startsWith(`</${tag}`, index)) {
+  /* Scanning case-insensitively rather than lowercasing the whole template: this runs once per
+   * raw-text element and again inside every close-tag scan, so a copy of the file each time
+   * turns a page of `<script>`s into quadratic work. */
+  for (let index = text.indexOf('<', position); index !== -1; index = text.indexOf('<', index + 1)) {
+    if (text.slice(index, index + needle.length).toLowerCase() === needle) {
       return index;
     }
   }
@@ -1631,10 +1549,11 @@ function createDecorator(content: string, trimOpen = false, trimClose = false, s
 
 function createComment(content: string, start?: number, end?: number): CommentStatement {
   const isBlockStyle = /^\s*!-{2}/.test(content);
-  const withoutOpen = content.replace(/^[\t ]*!-{0,2}/, '');
-  const withoutClosing = withoutOpen.replace(/-{2}\s*$/, '');
-  const inline = !withoutClosing.startsWith('\n');
-  let value = inline ? withoutClosing.replace(/^\s*/, '') : withoutClosing;
+  /* The tokenizer already stopped before the closing delimiter, so there is none to strip here;
+   * doing it anyway deleted a `--` the author wrote at the end of the body. */
+  const body = content.replace(/^[\t ]*!-{0,2}/, '');
+  const inline = !body.startsWith('\n');
+  let value = inline ? body.replace(/^\s*/, '') : body;
 
   value = value.replace(/[ \t]+$/gm, '');
 

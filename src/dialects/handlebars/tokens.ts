@@ -1,10 +1,11 @@
 import { isTemplateExpressionQuoteStart } from 'template-format-core';
-import type { TemplateBlockPrefix, TemplateDialect, TemplateToken } from 'template-format-core';
+import type { TemplateBlockPrefix, TemplateToken } from 'template-format-core';
 
-export const handlebarsDialect: TemplateDialect = {
-  name: 'handlebars',
+/* Deliberately not typed `: TemplateDialect`. That interface demanded nine more members than the
+ * parser and printer ever ask for, and every one of them was a second copy of Handlebars syntax
+ * kept in step by hand - `getLineCommentTag` had already drifted from what `printComment` does. */
+export const handlebarsDialect = {
   openDelimiter: '{{',
-  closeDelimiter: '}}',
   parseToken: parseHandlebarsToken,
   findNextOpen: findNextHandlebarsOpen,
   isEscapedOpen: isEscapedHandlebarsOpen,
@@ -12,17 +13,10 @@ export const handlebarsDialect: TemplateDialect = {
   consumeRawBlock: consumeHandlebarsRawBlock,
   getBlockExpression: getHandlebarsBlockExpression,
   getBlockPrefix: getHandlebarsBlockPrefix,
-  getTagDelimiters: getHandlebarsTagDelimiters,
   getPrintedBlockPrefix: getPrintedHandlebarsBlockPrefix,
-  getPartialPrefix: getHandlebarsPartialPrefix,
-  getDecoratorPrefix: getHandlebarsDecoratorPrefix,
   getElseKeyword: getHandlebarsElseKeyword,
   getBlockClosePrefix: getHandlebarsBlockClosePrefix,
-  getLineCommentTag: getHandlebarsLineCommentTag,
-  getBlockCommentTag: getHandlebarsBlockCommentTag,
-  getBlockCommentMarkers: getHandlebarsBlockCommentMarkers,
   shouldPreserveTokenVerbatim: shouldPreserveHandlebarsTokenVerbatim,
-  shouldPreserveUnclosedBlockRemainder: shouldPreserveUnclosedHandlebarsBlockRemainder,
 };
 
 function parseHandlebarsToken(text: string, position: number): TemplateToken {
@@ -85,6 +79,12 @@ function parseHandlebarsToken(text: string, position: number): TemplateToken {
 
   if (inner.startsWith('^')) {
     const name = inner.slice(1).trim().split(/\s+/)[0];
+
+    /* Bare `{{^}}` is the shorthand for `{{else}}`; only `{{^name}}` opens an inverted block. */
+    if (!name) {
+      return { kind: 'else', content: inner, name: 'else', ...baseToken };
+    }
+
     return { kind: 'blockStart', content: inner, name, specialForm: 'inverseBlock', ...baseToken };
   }
 
@@ -244,24 +244,12 @@ function getHandlebarsBlockPrefix(token: TemplateToken): TemplateBlockPrefix {
   return '#';
 }
 
-function getHandlebarsTagDelimiters(triple: boolean) {
-  return triple ? { open: '{{{', close: '}}}' } : { open: '{{', close: '}}' };
-}
-
 function getPrintedHandlebarsBlockPrefix(prefix: TemplateBlockPrefix): string {
   if (prefix === '#>' || prefix === '<') {
     return `${prefix} `;
   }
 
   return prefix;
-}
-
-function getHandlebarsPartialPrefix(): string {
-  return '> ';
-}
-
-function getHandlebarsDecoratorPrefix(): string {
-  return '*';
 }
 
 function getHandlebarsElseKeyword(): string {
@@ -272,33 +260,7 @@ function getHandlebarsBlockClosePrefix(path: string): string {
   return `/${path}`;
 }
 
-function getHandlebarsLineCommentTag(value: string): string {
-  if (value.startsWith('<')) {
-    return `{{!${value}}}`;
-  }
-
-  return `{{! ${value}}}`;
-}
-
-function getHandlebarsBlockCommentTag(value: string): string {
-  return `{{!-- ${value} --}}`;
-}
-
-function getHandlebarsBlockCommentMarkers() {
-  return {
-    blockOpen: '{{!--',
-    blockClose: '--}}',
-    inlineOpen: '{{!-- ',
-    inlineClose: ' --}}',
-    emptyBlock: '{{!-- --}}',
-    emptyInline: '{{!--  --}}',
-  };
-}
-
 function shouldPreserveHandlebarsTokenVerbatim(token: TemplateToken): boolean {
   return token.specialForm === 'elseIf';
 }
 
-function shouldPreserveUnclosedHandlebarsBlockRemainder(token: TemplateToken): boolean {
-  return token.specialForm === 'blockPartial' || token.specialForm === 'parent';
-}

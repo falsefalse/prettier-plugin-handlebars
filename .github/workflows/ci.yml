@@ -45,11 +45,10 @@ jobs:
         # dependency in an existing tree. The matrix supplies Prettier explicitly.
         run: npm install --no-save --package-lock=false --legacy-peer-deps prettier@${{ matrix.prettier-version }}
 
-      - name: Print versions
+      - name: Versions
         run: |
-          node --version
-          npm --version
-          node -e "console.log(require('prettier/package.json').version)"
+          node --version; npm --version
+          node -p -e "require('prettier/package.json').version"
 
       - name: Check
         run: npm run check

@@ -13,6 +13,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import prettier from 'prettier';
+import { renderDifference } from './render.mjs';
 import * as plugin from '../dist/plugin.js';
 
 const argv = process.argv.slice(2);
@@ -75,12 +76,6 @@ function collectFromGit(repo, pathspecs) {
     }));
 }
 
-/* Neither comments nor whitespace inside a mustache reaches the rendered page, so both are
- * normalised away before comparing what a template renders. */
-const stripComments = (text) => text.replace(/\{\{!--[\s\S]*?--\}\}/g, '').replace(/\{\{![^}]*\}\}/g, '');
-const canonical = (text) => stripComments(text).replace(/\{\{[\s\S]*?\}\}+/g, (m) => m.replace(/\s+/g, ''));
-const renderedText = (text) => canonical(text).replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-const whitespaceShape = (text) => canonical(text).replace(/<[^>]*>/g, ' ').replace(/[^\S\n]+/g, ' ');
 
 /* A line the formatter cannot help: even alone on its own line, its longest token overflows. */
 function isUnbreakable(line, width) {
@@ -96,7 +91,7 @@ const report = {
   total: files.length,
   formattable: 0,
   unformattable: [],
-  textChanged: [],
+  renderChanged: [],
   whitespaceChanged: [],
   nonIdempotent: [],
   overWidth: [],
@@ -117,8 +112,13 @@ for (const file of files) {
 
   report.formattable += 1;
 
-  if (renderedText(file.source) !== renderedText(first)) report.textChanged.push(file.name);
-  else if (whitespaceShape(file.source) !== whitespaceShape(first)) report.whitespaceChanged.push(file.name);
+  /* Compiled with the real Handlebars runtime rather than approximated with regexes: the
+   * approximation could not see whitespace control, standalone statements or broken quoting. */
+  const difference = renderDifference(file.source, first);
+  if (difference) {
+    const bucket = difference.kind === 'render' ? report.renderChanged : report.whitespaceChanged;
+    bucket.push({ name: file.name, ...difference });
+  }
   if (second !== first) report.nonIdempotent.push(file.name);
 
   first.split('\n').forEach((line, index) => {
@@ -133,14 +133,18 @@ if (asJson) {
 } else {
   const { total, formattable } = report;
   console.log(`coverage:        ${formattable}/${total} formattable`);
-  console.log(`rendered text:   ${report.textChanged.length} changed`);
+  console.log(`renders:         ${report.renderChanged.length} changed`);
   console.log(`whitespace:      ${report.whitespaceChanged.length} amount-only diffs`);
   console.log(`idempotence:     ${report.nonIdempotent.length} unstable`);
   console.log(`width (>${printWidth}):     ${report.overWidth.length} unexcused, ${report.overWidthExcused} unbreakable`);
 
   if (flag('--list-failures')) {
     for (const entry of report.unformattable) console.log(`  unformattable ${entry.name}: ${entry.error}`);
-    for (const name of report.textChanged) console.log(`  text changed  ${name}`);
+    for (const entry of [...report.renderChanged, ...report.whitespaceChanged]) {
+      console.log(`  ${entry.kind} changed ${entry.name} (${entry.branch})`);
+      console.log(`    before ${JSON.stringify(entry.before.slice(0, 160))}`);
+      console.log(`    after  ${JSON.stringify(entry.after.slice(0, 160))}`);
+    }
     for (const name of report.nonIdempotent) console.log(`  unstable      ${name}`);
   }
 

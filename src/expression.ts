@@ -1,3 +1,4 @@
+import { TemplateSyntaxError } from './errors';
 import type { Call, Expression, HashPair, Literal, LiteralType, PathExpression, SubExpression } from './types';
 
 const quoteCharacters = new Set(['"', "'", '`']);
@@ -106,9 +107,15 @@ class CallReader {
     this.index += 1;
 
     const inner = this.readCall(true);
-    if (this.peek() === ')') {
-      this.index += 1;
+
+    /* Printing the parts back out would invent the `)` the author did not write, turning a
+     * template Handlebars rejects into one it accepts - the opposite of what this branch does
+     * everywhere else. */
+    if (this.peek() !== ')') {
+      throw new TemplateSyntaxError("unterminated subexpression: expected ')'", ...this.span(start, this.index));
     }
+
+    this.index += 1;
 
     return {
       type: 'SubExpression',
@@ -188,6 +195,16 @@ class CallReader {
       }
 
       this.index = afterValue;
+
+      /* Handlebars rejects a positional param after a hash pair, and the printer prints params
+       * first regardless - so accepting this would silently re-order the author's arguments. */
+      if (hash.length > 0) {
+        throw new TemplateSyntaxError(
+          `unexpected ${value.source} after a hash pair: positional params come first`,
+          ...this.span(start, this.index),
+        );
+      }
+
       params.push(value);
     }
 

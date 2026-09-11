@@ -91,19 +91,24 @@ describe('block params', () => {
   });
 });
 
-/* The formatter has to keep working on templates that are mid-edit. */
+/* Anything the reader cannot classify becomes a PathExpression holding the raw text, so odd but
+ * closed input still round-trips rather than stopping the formatter. */
 describe('recovery', () => {
+  it.each(['', '   ', "unclosed 'str", 'weird ((deep))', 'trailing=', '=leading', 'a )'])(
+    'never throws or hangs on %j',
+    (source) => {
+      expect(() => parseCall(source)).not.toThrow();
+    },
+  );
+
+  /* The two exceptions, both cases where printing the parts back out would produce a template
+   * Handlebars accepts from one it rejects: an invented `)`, or re-ordered arguments. */
   it.each([
-    '',
-    '   ',
-    "unclosed 'str",
-    'weird ((deep))',
-    'trailing=',
-    '=leading',
-    'a )',
-    '((((',
-  ])('never throws or hangs on %j', (source) => {
-    expect(() => parseCall(source)).not.toThrow();
+    ['an unterminated subexpression', '((((', /unterminated subexpression/u],
+    ['a subexpression missing its close', "t (concat 'a'", /unterminated subexpression/u],
+    ['a positional param after a hash pair', 't a=1 c', /positional params come first/u],
+  ])('rejects %s', (_name, source, message) => {
+    expect(() => parseCall(source)).toThrow(message);
   });
 });
 
@@ -127,5 +132,29 @@ describe('ranges are absolute and contained', () => {
 
     expect(findTilingViolations(ast, source)).toEqual([]);
     expect(findExpressionViolations(ast, source)).toEqual([]);
+  });
+
+  /* A block in attribute position is not part of any tiled span - whitespace between attributes
+   * belongs to the formatter - so it used to be skipped, and its own body went unchecked with it. */
+  it('descends into a block sitting in attribute position', () => {
+    const source = '<div {{#if a}}data-x="1"{{/if}}>t</div>';
+    const ast = parse(source);
+
+    expect(findTilingViolations(ast, source)).toEqual([]);
+
+    const element = ast.body[0];
+    if (element?.type !== 'ElementNode') throw new Error('expected an element');
+    const attribute = element.attributes[0];
+    if (attribute?.type !== 'AttributeBlock' || attribute.block.type !== 'BlockStatement') {
+      throw new Error('expected a block in attribute position');
+    }
+
+    /* Widen the block's body span past its one child. Only a walk that reaches in reports it. */
+    Object.defineProperty(attribute.block.program, 'range', { value: [5, 31], configurable: true });
+
+    expect(findTilingViolations(ast, source).map((violation) => violation.kind)).toEqual([
+      'uncovered-head',
+      'uncovered-tail',
+    ]);
   });
 });

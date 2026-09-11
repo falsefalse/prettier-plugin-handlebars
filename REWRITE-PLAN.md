@@ -1,6 +1,6 @@
 # Printer rewrite plan
 
-Status: in progress (phases 0-6.3 done). Branch: `feat/printer-v2`, cut from the tip of `master`.
+Status: in progress (phases 0-6.4 done). Branch: `feat/printer-v2`, cut from the tip of `master`.
 `feat/style-options` stays as the record of what not to do.
 
 ## 1. What went wrong, precisely
@@ -224,7 +224,9 @@ Five properties, run over the fuzz generator **and** a real template corpus, not
    formatter; there the weaker check is that parts stay inside the call, ordered and
    non-overlapping.
 2. **Render equivalence** — `render(format(src), data) === render(src, data)` using real
-   Handlebars. `test/semantic-render.test.ts` already does this; it becomes the primary gate.
+   Handlebars, via `scripts/render.mjs`. The primary gate. It splits its verdict in two: a
+   *content* change (something moved on the page) and a *whitespace-amount* change (the same
+   content, a different amount of space between it). Both are held at zero on the corpus.
 3. **Width** — no output line exceeds `printWidth` unless it is one unbreakable token
    (a long URL, a long string literal). Assert with the exception enumerated, not waived.
 4. **Idempotence** — `format(format(x)) === format(x)`.
@@ -282,6 +284,7 @@ come up quickly.
 | 6.1 | Simplification pass over `printer.ts`, `expression.ts`, `call-shape.ts`. | unchanged | output byte-identical over the corpus; printer 506 → 441 lines |
 | 6.2 | **Refuse malformed input.** Every construct that opens must close; the parser throws with a location instead of recovering silently. | `test/syntax-errors.test.ts`; both fuzz gates become two-sided | corpus still byte-identical; every reject category covered |
 | 6.3 | Attribute values are whitespace-significant all the way down, so a block's body in a value is no longer laid out at the printer's indent level. | three in `printer-elements.test.ts`; two fuzz atoms | value bytes survive at any nesting depth; corpus still byte-identical |
+| 6.4 | **Render equivalence as a gate**, and the defects it found. Rejection regressions from 6.2, silent render changes from the rewrite, dead parser code. | `render-equivalence.test.ts`; both fuzz gates and the property gate compile with the real Handlebars runtime | corpus byte-identical with 0 render changes |
 | 7 | Differential against `prettier-hbs` on the corpus. | — | every divergence listed and justified as deliberate |
 | 8 | Corpus migration, chunked by directory. | — | each chunk reviewed by eye before the next |
 
@@ -351,6 +354,103 @@ printer already knows what to do with that flag — `literalline`, which resets 
 leaves trailing spaces alone — so `printAttribute` stopped special-casing text and routes every
 part through `printAny`. Prettier now also sees where the value's lines end, so width measurement
 over multi-line values is correct for the first time.
+
+### 8.3 Why phase 6.4 exists
+
+The rewrite deleted `test/semantic-render.test.ts` along with the old printer's suite. That suite
+compiled source *and* output with the real Handlebars runtime and asserted the renders matched -
+a property with no replacement, since idempotence, no-crash and tiling cannot see a changed
+render. Four defects walked straight through the gap.
+
+**The gate.** `scripts/render.mjs` renders a template twice - once with every conditional taking
+its main branch, once the inverse - with unknown helpers and partials resolving to markers, so
+rendering is total over arbitrary input and the fuzz corpus can drive it. Both fuzz gates and the
+property gate now use it; the property gate's regex approximation of "rendered text" is gone.
+
+It tolerates exactly three things a browser cannot see, and nothing else:
+
+| tolerated | why |
+|---|---|
+| runs of ASCII whitespace differing | a browser collapses them; re-indenting children is the formatter's job |
+| a space before `>` or `/>` | a tag broken across lines leaves one behind |
+| `a=x` vs `a="x"` | the same attribute; the formatter always quotes |
+
+Deliberately *not* `\s`: a non-breaking space is content. Whitespace *amounts* are checked by a
+second, stricter pass that collapses horizontal runs but counts newlines - a newline that appears
+or vanishes is how Handlebars' standalone rule announces itself. The corpus gate reports it
+separately and holds it at zero; the fuzz gate ignores it, because the generator emits one-line
+soup that has to wrap and reflowed prose is not a render change.
+
+**Rejection regressions from 6.2.** Turning silent recovery into a hard error exposed four
+pre-existing parser bugs by rejecting valid templates. `findRawTextClose` tracked quotes inside
+`<script>`/`<style>`, so an apostrophe in a comment hid the closing tag - and matched the tag
+case-sensitively, unlike the `pre`/`textarea` branch six lines above. It now does what a
+browser's tokenizer does: the first `</tag`, whatever it appears to sit inside, which is why
+`"<\\/script>"` has to be escaped in JS. `consumeNextNode` consumed its container's terminator,
+so a `{{! prettier-ignore }}` inside any element handed that element its own `</div>`. And
+`{{^}}`, the shorthand for `{{else}}`, tokenised as a nameless block.
+
+**Render changes from the rewrite.** `chooseQuote` looked only at the value's TextNode parts, so
+`class='{{t "x"}}'` was re-quoted with `"` and the attribute terminated early - invalid HTML,
+silently. A space between siblings was a breakable `line`, so width could move a partial onto its
+own line, where Handlebars' standalone rule strips the whitespace around it; and breaking an
+inline block put its markers on their own lines, doing the same. An empty `{{else}}` was dropped
+along with its `~` markers. `textPieces` split on `\s`, which matched U+00A0.
+
+**Known limitation, pinned rather than hidden.** Handlebars strips the newline after a standalone
+partial, which turns the *next* line's indentation into rendered content. Indenting children is
+the formatter's job, so the two collide - but only when the formatter *changes* that indentation,
+which never happens on a file it has already formatted. `render-equivalence.test.ts` records both
+halves.
+
+**Dead code.** `consumeUnsupportedBlock` and its two guards were unreachable: `elseIf` is only
+ever set on a `kind: 'else'` token, never a `blockStart`. `normalizeTagAttributes` was vestigial -
+`parseDynamicAttribute` already assembles `data-{{x}}`, and the merge could not tell that apart
+from two attributes with a space between them, so it glued those together too.
+
+### 8.4 What the review pass found
+
+Two adversarial reads of the finished branch, after every gate was green. Nothing here was
+caught by the gates, which is the point: each one is a case the gates do not have a shape for.
+
+**Silently accepting what Handlebars rejects.** `readSubExpression` took a missing `)` and
+printed one, turning a template the runtime refuses into one it accepts - a formatter inventing
+syntax. `readCall` took a positional param after a hash pair, which Handlebars also refuses, and
+the printer prints params first regardless, so the author's arguments came back re-ordered. Both
+throw now.
+
+**Whitespace the formatter does not own.** A gap between attributes is normally the formatter's,
+because it never reaches the page - but a mustache in attribute position emits content, so
+`{{a}}{{b}}` is one attribute and `{{a}} {{b}}` is two. `printOpenTag` joined every attribute
+with a `line` and glued pairs came back split. Attributes now carry a `glued` flag, set from the
+character before them rather than from whether `skipWhitespace` moved, since some of the
+attribute readers consume their own trailing space.
+
+**`fill` measures its last item blind.** Prettier's FILL case passes `[]` as the rest commands,
+so whatever follows the last item does not count towards the line's width. A `</p>` emitted
+after `printBody` was therefore free, the line came out over width, and the next pass - now
+seeing a real break there - printed it differently. `printBody` takes its closing marker as an
+argument and glues it onto the last piece when there is no trailing gap.
+
+**Two copies of the syntax table.** `handlebarsDialect` was typed `: TemplateDialect`, an
+interface demanding nine members the parser and printer never ask for, each one a second
+hand-maintained copy of Handlebars syntax. They had already drifted: `getLineCommentTag` knew
+that `{{!< layout}}` is express-hbs' layout directive and must not be padded, and `printComment`
+did not - so the layout silently stopped being applied. The printer learned the rule and the
+dead members went, annotation included.
+
+**Checks that could not fail.** `childListsOf` names the lists that must *tile*, and `walk` used
+it to find children too - so a block in attribute position, which is part of no tiled span, went
+unvisited along with everything under it. Walking is now a wider notion than tiling.
+`prettier-ignore-attribute` was recognised as a directive and then never consulted, because
+`parseTag` has no idea it exists; it silently behaved as `prettier-ignore` and swallowed the
+whole next node. It is not a directive any more.
+
+**Rejecting what is valid.** The first cut of the unquoted-attribute rule refused any value
+holding a quote, and flagged two valid corpus files: `accept={{mimefor 'x'}}` is a string
+literal inside a mustache, not a delimiter. Only a value holding *both* quote kinds is
+unprintable - a quoted one would have ended at the first matching delimiter - so only that is
+refused.
 
 ## 9. Risks
 

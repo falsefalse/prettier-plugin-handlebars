@@ -21,6 +21,8 @@ export interface Program extends SourceRange {
 export interface AttributeValue extends SourceRange {
   type: 'AttributeValue';
   parts: AttributeValuePart[];
+  /** The value between the quotes, verbatim. Quotes inside a mustache get printed too. */
+  raw: string;
 }
 
 export type AttributeValuePart =
@@ -31,7 +33,11 @@ export type AttributeValuePart =
   | DecoratorStatement
   | CommentStatement;
 
-export type ElementAttribute =
+/**
+ * `glued` marks an attribute the author wrote with no space before it. For a mustache or block in
+ * attribute position that space renders, so the printer may not invent one.
+ */
+export type ElementAttribute = { glued?: boolean } & (
   | {
       type: 'Attribute';
       name: string;
@@ -44,7 +50,8 @@ export type ElementAttribute =
   | {
       type: 'AttributeBlock';
       block: MustacheStatement | BlockStatement | PartialStatement | DecoratorStatement | CommentStatement;
-    };
+    }
+);
 
 export interface ElementNode extends SourceRange {
   type: 'ElementNode';
@@ -135,7 +142,6 @@ export interface BlockStatement extends MustacheBase, SourceRange {
   inverse: Program;
   inverseTrimOpen?: boolean;
   inverseTrimClose?: boolean;
-  rawOpen: string;
   blockPrefix?: '#' | '#>' | '#*' | '^' | '<' | '$';
   closeTrimOpen?: boolean;
   closeTrimClose?: boolean;

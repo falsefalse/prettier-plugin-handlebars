@@ -33,7 +33,7 @@ const hardlines = (count: number): Doc[] => Array.from({ length: count }, () => 
 
 /* Sibling whitespace is laid out as pieces so a hard break can end the run it sits in, rather
  * than forcing every other gap in the same program to break with it. */
-type Piece = { kind: 'break'; count: number } | { kind: 'space' } | { kind: 'doc'; doc: Doc };
+type Piece = { kind: 'break'; count: number } | { kind: 'space'; hard?: boolean } | { kind: 'doc'; doc: Doc };
 
 const isGap = (piece: Piece): boolean => piece.kind !== 'doc';
 
@@ -59,10 +59,12 @@ function textPieces(node: TextNode): Piece[] {
     return [{ kind: 'doc', doc: join(literalline, node.chars.split('\n')) }];
   }
 
+  /* ASCII whitespace only. A non-breaking space is content the author chose - it suppresses a
+   * line break on the page - so it travels inside a word rather than becoming a gap. */
   return node.chars
-    .split(/(\s+)/u)
+    .split(/([ \t\n\r\f]+)/u)
     .filter(Boolean)
-    .map((part) => (/^\s+$/u.test(part) ? whitespacePiece(part) : { kind: 'doc' as const, doc: part }));
+    .map((part) => (/^[ \t\n\r\f]+$/u.test(part) ? whitespacePiece(part) : { kind: 'doc' as const, doc: part }));
 }
 
 /* Recovered text is copied through, but its trailing whitespace belongs to the surrounding
@@ -118,6 +120,12 @@ function assemble(pieces: Piece[]): Doc[] {
     }
 
     if (piece.kind === 'space') {
+      /* A space that must not become a line break is simply a space, glued to its neighbours. */
+      if (piece.hard) {
+        glued.push(' ');
+        continue;
+      }
+
       flushGlued();
       /* fill reads even positions as content; keep separators on the odd ones. */
       if (run.length % 2 === 0) run.push('');
@@ -134,7 +142,10 @@ function assemble(pieces: Piece[]): Doc[] {
 
 /** Gaps outside a content run have nothing to wrap, so they print as themselves. */
 function gapDocs(gaps: Piece[]): Doc[] {
-  return gaps.flatMap((gap) => (gap.kind === 'break' ? hardlines(gap.count) : gap.kind === 'space' ? [line] : []));
+  return gaps.flatMap((gap) => {
+    if (gap.kind === 'break') return hardlines(gap.count);
+    return gap.kind === 'space' ? [gap.hard ? ' ' : line] : [];
+  });
 }
 
 /** The half-open span of `pieces` with the whitespace at either end excluded. */
@@ -197,6 +208,12 @@ function printComment(node: CommentStatement): Doc {
   const [open, close] = node.block || node.multiline ? ['{{!--', '--}}'] : ['{{!', '}}'];
   const body = node.value;
 
+  /* `{{!< layout}}` is express-hbs' layout directive, not prose: padding it to `{{! < layout }}`
+   * stops it being recognised and the layout silently stops being applied. */
+  if (!node.block && !node.multiline && body.startsWith('<')) {
+    return [open, body, close];
+  }
+
   /* A body the author started on its own line is re-indented under the comment, so it follows
    * the surrounding structure instead of staying frozen at the column it was written at.
    * Common indentation is stripped and re-applied, which keeps the body's *relative* shape. */
@@ -217,12 +234,16 @@ function printComment(node: CommentStatement): Doc {
   return [open, lead, join(literalline, body.split('\n')), tail, close];
 }
 
-/** The quote that needs no escaping; `singleQuote` decides only when either would do. */
-function chooseQuote(parts: AttributeValue['parts'], preferSingle: boolean): '"' | "'" {
-  const text = parts.map((part) => (part.type === 'TextNode' ? part.chars : '')).join('');
+/**
+ * The quote that needs no escaping; `singleQuote` decides only when either would do.
+ *
+ * Against the value's raw text, not just its TextNode parts: a quote inside a mustache is printed
+ * too, so `class='{{t "x"}}'` cannot be re-quoted with `"` without ending the attribute early.
+ */
+function chooseQuote(value: AttributeValue, preferSingle: boolean): '"' | "'" {
   const preferred = preferSingle ? "'" : '"';
 
-  return text.includes(preferred) ? (preferSingle ? '"' : "'") : preferred;
+  return value.raw.includes(preferred) ? (preferSingle ? '"' : "'") : preferred;
 }
 
 function printAttribute(attribute: ElementAttribute, options: PrintOptions): Doc {
@@ -244,7 +265,7 @@ function printAttribute(attribute: ElementAttribute, options: PrintOptions): Doc
    * keeps a block's body from being laid out at the printer's indent level instead of the
    * author's - and what lets prettier see where the value's own lines end. */
   const { parts } = attribute.value;
-  const quote = chooseQuote(parts, options.singleQuote === true);
+  const quote = chooseQuote(attribute.value, options.singleQuote === true);
 
   return [attribute.name, '=', quote, ...parts.map((part) => printAny(part, options)), quote];
 }
@@ -261,40 +282,49 @@ function printOpenTag(node: ElementNode, options: PrintOptions): Doc {
     return ['<', node.tag, marker];
   }
 
-  const attributes = node.attributes.map((attribute) => printAttribute(attribute, options));
+  /* A gap between attributes is normally the formatter's - it never reaches the page. But a
+   * mustache or block in attribute position emits content, so two the author glued together
+   * have to stay glued: `{{a}}{{b}}` is one attribute, `{{a}} {{b}}` is two. */
+  const attributes = node.attributes.flatMap((attribute, index) => {
+    const printed = printAttribute(attribute, options);
+    return index === 0 || attribute.glued ? [printed] : [line, printed];
+  });
 
-  return group([
-    '<',
-    node.tag,
-    indent([line, join(line, attributes)]),
-    ifBreak([softline, marker.trimStart()], marker),
-  ]);
+  return group(['<', node.tag, indent([line, ...attributes]), ifBreak([softline, marker.trimStart()], marker)]);
 }
 
 /**
- * The content between two markers - a tag's brackets, or a block's open and close. The trailing
- * gap sits inside the indent and is dedented from there, which lands the following marker back
- * at the container's own level; dedenting outside the indent overshoots, and the overshoot
- * compounds with nesting depth.
+ * The content between two markers - a tag's brackets, or a block's open and close - together
+ * with the marker that ends it.
+ *
+ * The trailing gap sits inside the indent and is dedented from there, which lands the closing
+ * marker back at the container's own level; dedenting outside the indent overshoots, and the
+ * overshoot compounds with nesting depth.
+ *
+ * When there is no trailing gap the closing marker is glued onto the last piece rather than
+ * emitted after it. `fill` measures its last item with no knowledge of what follows, so a
+ * `</p>` left outside did not count towards the width of the line it landed on: the line came
+ * out over width, and the next pass - now seeing a real break there - printed it differently.
  */
-function printBody(pieces: Piece[]): Doc[] {
+function printBody(pieces: Piece[], closer: Doc): Doc[] {
   if (pieces.length === 0) {
-    return [];
+    return [closer];
   }
 
   const [start, end] = contentSpan(pieces);
 
   /* Nothing but whitespace inside: emit it once rather than as both edges. */
   if (start >= end) {
-    return gapDocs(pieces.slice(0, 1));
+    return [...gapDocs(pieces.slice(0, 1)), closer];
   }
 
+  const trailing = gapDocs(pieces.slice(end)).map((doc) => dedent(doc));
+  const content: Piece[] =
+    trailing.length > 0 ? pieces.slice(start, end) : [...pieces.slice(start, end), { kind: 'doc', doc: closer }];
+
   return [
-    indent([
-      ...gapDocs(pieces.slice(0, start)),
-      ...assemble(pieces.slice(start, end)),
-      ...gapDocs(pieces.slice(end)).map((doc) => dedent(doc)),
-    ]),
+    indent([...gapDocs(pieces.slice(0, start)), ...assemble(content), ...trailing]),
+    ...(trailing.length > 0 ? [closer] : []),
   ];
 }
 
@@ -305,7 +335,7 @@ function printElement(node: ElementNode, options: PrintOptions): Doc {
     return openTag;
   }
 
-  return group([openTag, ...printBody(childPieces(node.children, options)), '</', node.tag, '>']);
+  return group([openTag, ...printBody(childPieces(node.children, options), ['</', node.tag, '>'])]);
 }
 
 function printBlock(node: BlockStatement, options: PrintOptions): Doc {
@@ -314,28 +344,33 @@ function printBlock(node: BlockStatement, options: PrintOptions): Doc {
     childPieces(program.body, options),
   );
 
-  /* A block the author kept on one line is an atom: splitting `{{else if` from its condition to
-   * save a few columns is never an improvement. Once the body breaks, the markers already sit on
-   * their own lines and are free to wrap. */
+  /* A block the author kept on one line is an atom, body and markers alike: splitting `{{else if`
+   * from its condition to save a few columns is never an improvement, and wrapping the body would
+   * leave a marker alone on its line, where Handlebars strips the whitespace around it and the
+   * page changes. Once the body breaks, the markers already sit on their own lines. */
   const breakable = sections.some((pieces) => pieces.some((piece) => piece.kind === 'break'));
+  const bodies = breakable
+    ? sections
+    : sections.map((pieces) => pieces.map((piece) => (piece.kind === 'space' ? { ...piece, hard: true } : piece)));
 
   const prefix = templateDialect.getPrintedBlockPrefix(node.blockPrefix ?? '#');
-  const parts: Doc[] = [
-    printCall(node, ['{{', trim(node.trimOpen), prefix], [trim(node.trimClose), '}}'], breakable),
-    ...printBody(sections[0]),
-  ];
+  const markers: Doc[] = [printCall(node, ['{{', trim(node.trimOpen), prefix], [trim(node.trimClose), '}}'], breakable)];
+  const between: Piece[][] = [bodies[0]];
 
   branches.forEach((branch, index) => {
     const open = ['{{', trim(branch.trimOpen), `${templateDialect.getElseKeyword()} `];
-    parts.push(printCall(branch, open, [trim(branch.trimClose), '}}'], breakable), ...printBody(sections[index + 1]));
+    markers.push(printCall(branch, open, [trim(branch.trimClose), '}}'], breakable));
+    between.push(bodies[index + 1]);
   });
 
-  if (node.inverse.body.length > 0) {
-    const open = ['{{', trim(node.inverseTrimOpen), templateDialect.getElseKeyword(), trim(node.inverseTrimClose), '}}'];
-    parts.push(open, ...printBody(sections[sections.length - 1]));
+  /* An empty `{{else}}` prints nothing - unless it carries `~`, which strips whitespace that
+   * would otherwise render. */
+  if (node.inverse.body.length > 0 || node.inverseTrimOpen || node.inverseTrimClose) {
+    markers.push(['{{', trim(node.inverseTrimOpen), templateDialect.getElseKeyword(), trim(node.inverseTrimClose), '}}']);
+    between.push(bodies[bodies.length - 1]);
   }
 
-  parts.push([
+  markers.push([
     '{{',
     trim(node.closeTrimOpen),
     templateDialect.getBlockClosePrefix(node.path.source),
@@ -343,8 +378,14 @@ function printBlock(node: BlockStatement, options: PrintOptions): Doc {
     '}}',
   ]);
 
-  return group(parts);
+  /* Each body carries the marker that closes it, so `fill` can see it when measuring. */
+  return group([markers[0], ...between.flatMap((pieces, index) => printBody(pieces, markers[index + 1]))]);
 }
+
+/* Handlebars strips the whitespace around a partial, comment or block that ends up alone on its
+ * line - a mustache is not treated that way. So a space next to one of these has to stay a
+ * space: wrapping there would start or stop that stripping, and change what the page shows. */
+const standaloneStatements = new Set(['PartialStatement', 'CommentStatement', 'BlockStatement', 'DecoratorStatement']);
 
 /**
  * Children need no separators: the whitespace between them is already in the tree, so the
@@ -352,14 +393,31 @@ function printBlock(node: BlockStatement, options: PrintOptions): Doc {
  */
 function childPieces(nodes: Node[], options: PrintOptions): Piece[] {
   const pieces: Piece[] = [];
+  const sensitive: number[] = [];
 
   for (const child of nodes) {
     if (child.type === 'TextNode') {
       pieces.push(...textPieces(child));
-    } else if (child.type === 'UnmatchedNode') {
+      continue;
+    }
+
+    if (child.type === 'UnmatchedNode') {
       pieces.push(...unmatchedPieces(child));
-    } else {
-      pieces.push({ kind: 'doc', doc: printAny(child, options) });
+      continue;
+    }
+
+    if (standaloneStatements.has(child.type)) {
+      sensitive.push(pieces.length);
+    }
+
+    pieces.push({ kind: 'doc', doc: printAny(child, options) });
+  }
+
+  for (const at of sensitive) {
+    for (const neighbour of [at - 1, at + 1]) {
+      if (pieces[neighbour]?.kind === 'space') {
+        pieces[neighbour] = { kind: 'space', hard: true };
+      }
     }
   }
 

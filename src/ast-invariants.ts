@@ -58,15 +58,32 @@ function childListsOf(node: Node): ChildList[] {
   }
 }
 
+/**
+ * Everything `walk` has to descend into. Wider than `childListsOf`, which only names the lists
+ * that must *tile*: an `{{#if}}` sitting in attribute position is not part of any tiled span -
+ * whitespace between attributes is the formatter's - but its own body still is, and its params
+ * still have to sit inside it.
+ */
+function childrenOf(node: Node): Node[] {
+  const children = childListsOf(node).flatMap((list) =>
+    list.nodes.flatMap((child) => ('type' in child ? [child] : [])),
+  );
+
+  if (node.type === 'ElementNode') {
+    const blocks = node.attributes.flatMap((attribute) =>
+      attribute.type === 'AttributeBlock' ? [attribute.block] : [],
+    );
+    children.push(...blocks);
+  }
+
+  return children;
+}
+
 function walk(node: Node, visit: (node: Node) => void): void {
   visit(node);
 
-  for (const list of childListsOf(node)) {
-    for (const child of list.nodes) {
-      if ('type' in child) {
-        walk(child, visit);
-      }
-    }
+  for (const child of childrenOf(node)) {
+    walk(child, visit);
   }
 }
 

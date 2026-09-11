@@ -46,7 +46,7 @@ describe('HTML Elements', () => {
     expect(el.selfClosing).toBe(false);
     expect(el.attributes).toEqual([]);
 
-    // Должен быть один TextNode с "text"
+    // one TextNode holding "text"
     expect(el.children).toEqual([
       expect.objectContaining({
         type: 'TextNode',
@@ -65,7 +65,7 @@ describe('HTML Elements', () => {
     expect(el.selfClosing).toBe(false);
     expect(el.attributes).toEqual([]);
 
-    // Структура: TextNode "text", ElementNode br, TextNode "text"
+    // shape: TextNode "text", ElementNode br, TextNode "text"
     expect(el.children[0]).toMatchObject({
       type: 'TextNode',
       chars: 'text'
@@ -107,7 +107,7 @@ describe('Mustache in HTML attributes', () => {
       })
     });
 
-    // В value.parts должен быть MustacheStatement с path "text"
+    // value.parts holds a MustacheStatement with path "text"
     expect(attr.value.parts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -175,7 +175,7 @@ describe('Mustache in HTML attributes', () => {
       })
     });
 
-    // В parts должен быть BlockStatement с path "if"
+    // parts holds a BlockStatement with path "if"
     expect(attr.value.parts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -211,7 +211,7 @@ describe('Mustache in HTML attributes', () => {
     expect(el.selfClosing).toBe(false);
     expect(el.children).toEqual([]);
 
-    // тут ожидаем как минимум 3 обычных атрибута + 2 AttributeBlock
+    // at least 3 plain attributes plus 2 AttributeBlocks
     const attributes = el.attributes;
 
     const idAttr = attributes.find(a => a.type === 'Attribute' && a.name === 'id');
@@ -230,7 +230,7 @@ describe('Mustache in HTML attributes', () => {
     expect(eachBlock).toBeDefined();
     expect(ifEqualsBlock).toBeDefined();
 
-    // id: в value.parts есть BlockStatement 'if'
+    // id: value.parts holds a BlockStatement 'if'
     expect(idAttr.value.parts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -253,7 +253,7 @@ describe('Mustache in HTML attributes', () => {
       ])
     );
 
-    // data-a123: просто статическое значение "value"
+    // data-a123: just the static value "value"
     expect(dataAttr.value.parts).toEqual([
       expect.objectContaining({
         type: 'TextNode',
@@ -261,7 +261,7 @@ describe('Mustache in HTML attributes', () => {
       })
     ]);
 
-    // eachBlock: AttributeBlock с BlockStatement 'each'
+    // eachBlock: an AttributeBlock holding a BlockStatement 'each'
     expect(eachBlock).toMatchObject({
       type: 'AttributeBlock',
       block: expect.objectContaining({
@@ -382,7 +382,7 @@ describe('Mustache blocks in children', () => {
 
     expect(el.tag).toBe('div');
 
-    // В детях должен быть BlockStatement 'if'
+    // the children hold a BlockStatement 'if'
     const ifBlock = el.children.find(
       child =>
         child.type === 'BlockStatement' &&
@@ -471,7 +471,7 @@ describe('Mustache blocks in children', () => {
         {{> 'ui/input-primary/input-primary'
           id= 'compare-family-name'
           type = 'text'
-          placeholder='Фамилия'
+          placeholder='Surname'
         }}
       </div>
     `;
@@ -486,7 +486,7 @@ describe('Mustache blocks in children', () => {
       hash: [
         { key: 'id', value: "'compare-family-name'" },
         { key: 'type', value: "'text'" },
-        { key: 'placeholder', value: "'Фамилия'" }
+        { key: 'placeholder', value: "'Surname'" }
       ]
     });
   });
@@ -506,7 +506,7 @@ describe('Mustache blocks in children', () => {
     expect(el.tag).toBe('div');
     expect(el.children).toEqual([]);
 
-    // В attributes должен быть AttributeBlock с BlockStatement 'each'
+    // attributes holds an AttributeBlock with a BlockStatement 'each'
     const eachAttrBlock = el.attributes.find(
       a =>
         a.type === 'AttributeBlock' &&

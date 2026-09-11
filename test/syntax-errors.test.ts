@@ -31,6 +31,11 @@ describe('malformed templates are rejected', () => {
     ['crossed tags', '<div><span>x</div></span>', 'unexpected </div>: expected </span>'],
     ['void element closed', '<br></br>', '<br> is a void element and cannot be closed'],
     ['unterminated tag', '<div class="foo>x</div>', "unterminated tag: expected '>'"],
+    [
+      'unquoted value holding both quotes',
+      '<div title=a"b\'c>x</div>',
+      'unquoted attribute value cannot contain both quote characters',
+    ],
     ['unterminated close tag', '<div>x</div', "unterminated tag: expected '>'"],
     ['unclosed block', '{{#if a}}\n  x\n', 'unclosed block: expected {{/if}}'],
     ['mismatched block close', '{{#if a}}x{{/unless}}', 'unclosed block: expected {{/if}}'],
@@ -50,6 +55,17 @@ describe('malformed templates are rejected', () => {
     ['unterminated block comment', '{{!-- x', 'unterminated {{!--: expected --}}'],
   ])('%s', (_name, source, message) => {
     expect(failure(source).message).toContain(message);
+  });
+
+  /* One quote kind is fine - the printer wraps the value in the other one - and a quote inside a
+   * mustache is a string literal, not a delimiter. Rejecting every quote flagged two valid
+   * corpus files. */
+  it.each([
+    ['<div title=a"b>x</div>', '<div title=\'a"b\'>x</div>\n'],
+    ["<div title=a'b>x</div>", '<div title="a\'b">x</div>\n'],
+    ["<img accept={{mimefor 'x'}}>", '<img accept="{{mimefor \'x\'}}">\n'],
+  ])('quotes an unquoted value that holds one quote kind: %j', async (source, expected) => {
+    expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] })).toBe(expected);
   });
 
   /* We close optional end tags in this house, so the HTML spec's implicit closes are errors too:
@@ -112,12 +128,40 @@ describe('the escape hatches still work', () => {
     ).resolves.toBe(`${source}\n`);
   });
 
-  it('leaves the node after a prettier-ignore alone, malformed or not', async () => {
-    const source = '{{! prettier-ignore }}\n<div    a=1>x';
+  it('leaves the node after a prettier-ignore alone', async () => {
+    const source = '{{! prettier-ignore }}\n<div    a=1>x</div>';
 
     await expect(
       prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] }),
     ).resolves.toBe(`${source}\n`);
+  });
+
+  /* Only the three directives that do something are directives. `prettier-ignore-attribute` was
+   * recognised and then never consulted - `parseTag` has no idea it exists - so it silently
+   * behaved as `prettier-ignore` and swallowed the whole next node instead of one attribute. */
+  it.each(['{{! prettier-ignore-attribute }}', '{{! prettier-ignore-everything }}'])(
+    'treats %j as an ordinary comment',
+    async (comment) => {
+      await expect(
+        prettier.format(`${comment}\n<div    a=1>x</div>`, { parser: 'handlebars', plugins: [plugin as never] }),
+      ).resolves.toBe(`${comment}\n<div a="1">x</div>\n`);
+    },
+  );
+
+  /* `{{! prettier-ignore }}` ignores *the next node*, so it needs to know where that node ends.
+   * When the markup is malformed there is no such extent, and the directive is only a comment -
+   * the region form is the escape hatch for markup that does not balance. Determining the extent
+   * by parsing instead is what used to let an ignored region swallow its container's `</div>`
+   * or `{{/if}}`, and let a directive meant to suppress formatting reject the file. */
+  it('does not apply to markup whose extent cannot be determined', () => {
+    expect(() => parse('{{! prettier-ignore }}\n<div    a=1>x')).toThrow(/unclosed tag/u);
+  });
+
+  it.each([
+    ['an element that would swallow its block', '{{#if a}}{{! prettier-ignore }}<div>x{{/if}}', /unclosed tag/u],
+    ['crossed tags after the directive', '{{! prettier-ignore }}\n<div><span>x</div></span>', /unexpected <\/span>/u],
+  ])('reports the real defect, not one the directive caused: %s', (_name, source, message) => {
+    expect(() => parse(source)).toThrow(message);
   });
 
   /* How the corpus writes markup that only balances at render time - see cost_centers_fields.hbs. */
@@ -149,5 +193,61 @@ describe('prettier surfaces the failure', () => {
     const stderr = `[error] page.hbs: ${error.name}: ${error.message}`;
 
     expect(stderr).toMatch(/^.+?:\s(?:SyntaxError):\s(?<message>.+) \((?<line>\d+):(?<col>\d+)\)/mu);
+  });
+});
+
+/**
+ * Rejection is only tolerable if it is rejecting the right things. Each of these was refused by
+ * an earlier pass over a parser bug that recovery had been hiding: a template that is perfectly
+ * valid used to come back as "unclosed", and the whole file failed to format.
+ */
+describe('valid templates that were once rejected', () => {
+  it.each([
+    ["an apostrophe in a JS comment", "<script>\n  // it's fine\n  var a = 1;\n</script>"],
+    ['an apostrophe in a regex', "<script>var r = /it's/;</script>"],
+    ['an apostrophe in a CSS comment', "<style>/* don't */ a{color:red}</style>"],
+    ['a backtick in a template literal', '<script>var s = `a`;</script>'],
+    ['a tag name in another case', '<SCRIPT>var a=1;</script>'],
+    ['prettier-ignore inside an element', '<div>{{! prettier-ignore }}text</div>'],
+    ['prettier-ignore with nothing to ignore', '<div>{{! prettier-ignore }}</div>'],
+    ['prettier-ignore on its own line', '<div>\n  {{! prettier-ignore }}\n</div>'],
+    ['prettier-ignore inside a block', '{{#if a}}{{! prettier-ignore }}{{/if}}'],
+    ['the {{^}} inverse shorthand', '{{#if x}}a{{^}}b{{/if}}'],
+    ['{{^}} in an each', '{{#each xs}}a{{^}}none{{/each}}'],
+  ])('accepts %s', (_name, source) => {
+    expect(() => parse(source)).not.toThrow();
+  });
+
+  /* Raw text ends at the first `</tag`, exactly as a browser tokenises it - which is why this
+   * one *is* malformed: everything after the first `</script>` is markup, and the second one
+   * closes nothing. */
+  it('still rejects an unescaped </script> in a string', () => {
+    expect(() => parse('<script>var t = "</script>";</script>')).toThrow(/no tag is open/u);
+  });
+
+  it('accepts it once escaped, the way a browser requires', () => {
+    expect(() => parse('<script>var t = "<\\/script>";</script>')).not.toThrow();
+  });
+});
+
+/* A directive has to be the whole comment. Matching a substring meant any comment mentioning it
+ * silently switched formatting off - and `prettier-ignore-start` opened a region that then had
+ * to be closed or the file was rejected. */
+describe('prettier-ignore is a directive, not a word', () => {
+  it('ignores a comment that merely mentions it', async () => {
+    const output = await prettier.format("{{!-- do not add prettier-ignore here --}}\n<div   a='1'></div>", {
+      parser: 'handlebars',
+      plugins: [plugin as never],
+    });
+
+    expect(output).toBe('{{!-- do not add prettier-ignore here --}}\n<div a="1"></div>\n');
+  });
+
+  it('still honours the real thing', async () => {
+    const source = '{{! prettier-ignore }}\n<div   a=1>x</div>';
+
+    await expect(
+      prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] }),
+    ).resolves.toBe(`${source}\n`);
   });
 });

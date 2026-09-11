@@ -1,9 +1,11 @@
-/* Property: formatting is idempotent and never crashes over the shared fuzz corpus - and the
- * other way round for the malformed corpus, which must be refused with a location rather than
- * quietly formatted into something the author did not write. */
+/* Properties over the shared fuzz corpus: formatting never crashes, is idempotent, and does not
+ * change what the template renders. And the other way round for the malformed corpus, which must
+ * be refused with a location rather than quietly formatted into something the author did not
+ * write. */
 import prettier from 'prettier';
 import * as plugin from '../dist/plugin.js';
 import { TemplateSyntaxError } from '../dist/errors.js';
+import { renderDifference } from './render.mjs';
 import { fuzzCasesFromEnv, malformed } from './fuzz-cases.mjs';
 
 const { cases, seed } = fuzzCasesFromEnv();
@@ -29,6 +31,20 @@ for (const testCase of cases) {
         source: testCase.source,
         firstPass,
         secondPass,
+      });
+    }
+
+    /* Only content changes. The generator emits one-line soup that has to wrap, and a space
+     * between siblings becoming a newline is a layout change a browser cannot see - the corpus
+     * gate watches that separately, over files where staying at zero means something. */
+    const difference = renderDifference(testCase.source, firstPass);
+    if (difference?.kind === 'render') {
+      failures.push({
+        id: testCase.id,
+        type: 'render-changed',
+        source: testCase.source,
+        firstPass,
+        difference,
       });
     }
   } catch (error) {
@@ -68,6 +84,13 @@ if (failures.length > 0) {
 
     if (failure.type === 'crash' || failure.type === 'accepted') {
       console.error(failure.error);
+      return;
+    }
+
+    if (failure.type === 'render-changed') {
+      console.error(`--- renders (${failure.difference.branch}) ---`);
+      console.error(JSON.stringify(failure.difference.before));
+      console.error(JSON.stringify(failure.difference.after));
       return;
     }
 

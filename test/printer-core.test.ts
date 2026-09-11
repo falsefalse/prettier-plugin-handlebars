@@ -132,6 +132,12 @@ describe('comments', () => {
     await expectStable('{{! one\n  two }}', '{{!-- one\n  two --}}\n');
   });
 
+  /* The tokenizer already stops before `--}}`, so stripping a trailing `--` here only ever ate
+   * something the author wrote. */
+  it('keeps a trailing double dash in the body', async () => {
+    await expectStable('{{!-- ends with -- --}}', '{{!-- ends with -- --}}\n');
+  });
+
   it.each(['{{!--\n--}}', '{{!--\n  a\n\n  b\n--}}'])('survives an odd body: %j', async (source) => {
     await expectStable(source, `${source}\n`);
   });

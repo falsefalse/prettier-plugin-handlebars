@@ -27,11 +27,12 @@ const atoms = [
   '<div class="\n    card\n    {{#if primary}}\n      card--primary\n    {{else}}\n      card--plain\n    {{/if}}\n  "></div>',
   '<span title="{{#each xs}}\n  {{this}}\n{{/each}}"></span>',
   '<div data-json=\'{"html":"<b>","value":"{{raw}}"}\'></div>',
-  '<input disabled type=text>',
+  '<input disabled type="text">',
   '<br><hr>',
   '<x-thing />',
   '<p>1 < 2 and {{ value }}</p>',
-  '<script>const tpl = "</script><div>{{value}}</div>";</script>',
+  '<script>const tpl = "<\\/script><div>{{value}}</div>";</script>',
+  "<script>\n  // it's fine, an apostrophe is not a string\n  var a = 1;\n</script>",
   '<script>const state={count:1};function read(){return state.count}</script>',
   '<style>.banner{color:red;background:#fff}</style>',
   '{{{{raw}}}}<div>{{ notParsed }}</div>{{{{/raw}}}}',
@@ -58,16 +59,27 @@ export const malformed = [
   '{{{{raw}}}}<div>{{ notParsed }}</div>',
   '{{! prettier-ignore-start }}\n<div class="raw">{{value}}</div>',
   '<!-- unterminated',
+  '<script>var tpl = "</script>";</script>',
   '{{foo',
   '{{!-- x',
 ];
 
+/* Bodies come in indented, the way a template is actually written. Feeding un-indented children
+ * to a container instead exercises one known limitation - see REWRITE-PLAN.md 9, "indentation
+ * after a standalone partial" - which `printer-core.test.ts` pins directly rather than having it
+ * turn up in a third of the generated cases. */
+const indented = (body) =>
+  body
+    .split('\n')
+    .map((line) => (line === '' ? line : `  ${line}`))
+    .join('\n');
+
 const wrappers = [
   (body) => body,
-  (body) => `<section>${body}</section>`,
-  (body) => `<div class="wrap">\n${body}\n</div>`,
-  (body) => `{{#if visible}}\n${body}\n{{/if}}`,
-  (body) => `{{#unless hidden}}\n${body}\n{{else}}\nFallback\n{{/unless}}`,
+  (body) => `<section>\n${indented(body)}\n</section>`,
+  (body) => `<div class="wrap">\n${indented(body)}\n</div>`,
+  (body) => `{{#if visible}}\n${indented(body)}\n{{/if}}`,
+  (body) => `{{#unless hidden}}\n${indented(body)}\n{{else}}\n  Fallback\n{{/unless}}`,
   (body) => `{{!-- header --}}\n${body}\n{{!-- footer --}}`,
 ];
 

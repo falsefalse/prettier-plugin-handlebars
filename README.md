@@ -107,22 +107,22 @@ this plugin adds nothing.
 
 ```bash
 npm ci
-npm run check        # build + tests + both fuzz gates
-npm run corpus:diff  # what the formatter would do to a corpus, for reading by eye
+npm run check   # build + tests + both fuzz gates
 ```
 
-`npm run check` runs 221 tests plus two fuzz gates, each two-sided: 429 generated cases must
-format idempotently without losing source, and 17 malformed cases must be refused with a
-location.
+`npm run check` runs the test suite plus two fuzz gates, each two-sided: every generated case
+must format idempotently, without losing source, and **without changing what the template
+renders** — compiled with the real Handlebars runtime, not approximated. Every malformed case
+must be refused with a location.
 
-`scripts/run-property-gate.mjs` checks the five properties over a real corpus:
+`scripts/run-property-gate.mjs` checks the same properties over a real corpus:
 
 ```bash
 node scripts/run-property-gate.mjs --git ../your-repo --width 95 path/to/templates
 ```
 
-The sixth gate is a person reading `corpus:diff`. The property gates prove correctness; they
-cannot see bad taste, which is the failure mode that actually matters here.
+The last gate is a person reading the diff the formatter would produce. The property gates prove
+correctness; they cannot see bad taste, which is the failure mode that actually matters here.
 
 [REWRITE-PLAN.md](./REWRITE-PLAN.md) is the design record — why the printer looks like this, and
 what the previous one got wrong.
