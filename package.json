@@ -44,14 +44,14 @@
     "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run build && npm test && node scripts/run-fuzz-check.mjs",
+    "check": "npm run build && npm test",
     "corpus:check": "node scripts/run-corpus-check.mjs",
     "corpus:oss": "node scripts/run-oss-corpus-check.mjs",
-    "fuzz:parser": "npm run build && node scripts/run-fuzz-check.mjs",
     "format:hbs-tree": "node scripts/format-hbs-tree.mjs",
     "smoke:install": "node scripts/install-smoke.mjs",
     "pack:check": "node scripts/pack-check.mjs",
-    "prepublishOnly": "npm run check"
+    "prepublishOnly": "npm run check",
+    "fuzz:format": "npm run build && node scripts/run-format-fuzz-check.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.5.0",
