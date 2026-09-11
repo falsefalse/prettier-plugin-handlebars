@@ -53,11 +53,3 @@ jobs:
 
       - name: Check
         run: npm run check
-
-      - name: Inspect package contents
-        run: npm run pack:check
-
-      - name: Install smoke
-        run: npm run smoke:install
-        env:
-          PRETTIER_VERSION: ${{ matrix.prettier-version }}

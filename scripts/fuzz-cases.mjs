@@ -24,6 +24,8 @@ const atoms = [
   '{{!--\n  <span>{{ price }}</span>\n--}}',
   '<!-- {{ not a mustache }} -->',
   '<div class="box {{#if active}}box--active{{/if}} {{ extra }}"></div>',
+  '<div class="\n    card\n    {{#if primary}}\n      card--primary\n    {{else}}\n      card--plain\n    {{/if}}\n  "></div>',
+  '<span title="{{#each xs}}\n  {{this}}\n{{/each}}"></span>',
   '<div data-json=\'{"html":"<b>","value":"{{raw}}"}\'></div>',
   '<input disabled type=text>',
   '<br><hr>',

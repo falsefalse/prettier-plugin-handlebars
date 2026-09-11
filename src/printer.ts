@@ -238,18 +238,15 @@ function printAttribute(attribute: ElementAttribute, options: PrintOptions): Doc
     return attribute.name;
   }
 
-  /* An attribute value is content: its text is reproduced exactly. Only the calls inside it may
-   * be reflowed, since whitespace within a mustache never reaches the rendered value. */
+  /* An attribute value is content: every space in it renders, so it is reproduced exactly. Only
+   * the calls inside it may be reflowed, since whitespace within a mustache never reaches the
+   * rendered value. The parser marks the value's text as whitespace-significant, which is what
+   * keeps a block's body from being laid out at the printer's indent level instead of the
+   * author's - and what lets prettier see where the value's own lines end. */
   const { parts } = attribute.value;
   const quote = chooseQuote(parts, options.singleQuote === true);
 
-  return [
-    attribute.name,
-    '=',
-    quote,
-    ...parts.map((part) => (part.type === 'TextNode' ? part.chars : printAny(part, options))),
-    quote,
-  ];
+  return [attribute.name, '=', quote, ...parts.map((part) => printAny(part, options)), quote];
 }
 
 /**

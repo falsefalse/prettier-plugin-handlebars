@@ -26,7 +26,7 @@ Recommended Prettier config:
 ```js
 /** @type {import("prettier").Config} */
 module.exports = {
-  plugins: ["@poliklot/prettier-plugin-handlebars"],
+  plugins: ['@poliklot/prettier-plugin-handlebars'],
   overrides: [
     {
       files: ["*.hbs", "*.handlebars"],
@@ -71,6 +71,30 @@ If your formatter does not pass `--stdin-filepath`, use explicit plugin and pars
   --plugin @poliklot/prettier-plugin-handlebars \
   --parser handlebars
 ```
+
+## Sublime Text
+
+[JsPrettier](https://packagecontrol.io/packages/JsPrettier) reads the position back out of
+Prettier's stderr rather than out of the error object, and it matches on the plain name. That is
+why syntax errors from this plugin call themselves `SyntaxError` rather than something more
+specific:
+
+```
+[error] page.hbs: SyntaxError: unclosed tag: expected </span> (3:3)
+```
+
+Rename that and the cursor goes nowhere. `src/errors.ts` says so next to the assignment, and
+`test/syntax-errors.test.ts` has a test that fails if it drifts.
+
+## Syntax errors in the editor
+
+Malformed templates are rejected rather than reformatted, so an editor that formats on save will
+report a failure instead of silently writing a degraded file. The error carries a source range
+(`loc.start` and `loc.end`), which is enough for an editor to select the offending construct, not
+just jump to the line.
+
+If the editor reports the error but does not move the cursor, it is reading stderr rather than the
+error object — see the Sublime Text note above.
 
 ## CLI sanity check
 

@@ -173,7 +173,8 @@ describe('simple parser coverage', () => {
         name: 'type',
         value: {
           type: 'AttributeValue',
-          parts: [{ type: 'TextNode', chars: 'text' }],
+          /* Every space inside an attribute value renders, so its text is marked significant. */
+          parts: [{ type: 'TextNode', chars: 'text', preserveWhitespace: true }],
         },
       },
     ]);

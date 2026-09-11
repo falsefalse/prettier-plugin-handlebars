@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { handlebarsDialect } from './tokens';
+import { handlebarsDialect } from '../src/dialects/handlebars/tokens';
 
 describe('handlebars dialect tokens', () => {
   it('classifies Handlebars token forms', () => {

@@ -83,6 +83,31 @@ describe('attribute values', () => {
     await expectStable('<a href="/bills/{{bill_id}}/edit">x</a>', '<a href="/bills/{{bill_id}}/edit">x</a>\n');
   });
 
+  /* A block's body inside a value is part of the value: those spaces reach the rendered string.
+   * Laying it out at the printer's own indent level - which has nothing to do with the column the
+   * value sits at - silently rewrote whitespace the author owns. Neither corpus had a multi-line
+   * block in a value, and the change was stable on the second pass, so nothing caught it. */
+  it('leaves a multi-line block inside a value exactly as written', async () => {
+    const value = '\n    card\n    {{#if primary}}\n      card--primary\n    {{else}}\n      card--plain\n    {{/if}}\n  ';
+
+    await expectStable(`<div\n  class="${value}"\n></div>`, `<div\n  class="${value}"\n></div>\n`);
+  });
+
+  /* The value sits at column 0 while the printer is three levels deep; the two must not be
+   * confused. The tag itself does break - a value holding hard breaks cannot fit on one line. */
+  it('keeps the body at the author\'s column however deep the printer is', async () => {
+    const value = '"\n{{#if x}}\n        deep\n{{/if}}\n"';
+
+    await expectStable(
+      `<p>\n  <span>\n    <i title=${value}></i>\n  </span>\n</p>`,
+      `<p>\n  <span>\n    <i\n      title=${value}\n    ></i>\n  </span>\n</p>\n`,
+    );
+  });
+
+  it('does not strip trailing spaces inside a value', async () => {
+    await expectStable('<div\n  class="a  \n  b"\n></div>', '<div\n  class="a  \n  b"\n></div>\n');
+  });
+
   it('wraps a call in a value that does not fit, since mustache whitespace does not render', async () => {
     const output = await format('<a title="{{t \'k\' billed=amount currency=symbol}}">x</a>', 40);
 

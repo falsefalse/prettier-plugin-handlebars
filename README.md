@@ -1,390 +1,133 @@
 # @poliklot/prettier-plugin-handlebars
 
-[![npm version](https://img.shields.io/npm/v/@poliklot/prettier-plugin-handlebars.svg)](https://www.npmjs.com/package/@poliklot/prettier-plugin-handlebars)
+A Prettier plugin for classic Handlebars templates with mixed HTML markup.
 
-Prettier plugin for classic Handlebars templates with mixed HTML markup.
+This is a personal fork. It is **opinionated**: it exposes no options of its own, only Prettier's
+core `printWidth`, `tabWidth`, `useTabs` and `singleQuote`. Everything else is a decision the
+formatter has already made.
 
-It formats `.hbs` / `.handlebars` files used in HTML-heavy Handlebars projects,
-with a focus on stable, idempotent output and preserving classic Handlebars
-semantics.
+## The rule everything follows
+
+> Whitespace that renders belongs to the author. Whitespace that does not belongs to the
+> formatter.
+
+Between two siblings, whitespace reaches the page, so it is reproduced exactly — a space stays a
+space, a newline stays a newline, a run of blank lines collapses to one. The formatter never
+invents a gap the author did not write, and never drops one they did.
+
+Inside a tag or a mustache, whitespace never reaches the page, so it is the formatter's: it is
+normalised, and driven by width, all-or-nothing.
+
+Two consequences worth stating plainly:
+
+- **A one-liner stays a one-liner.** `{{#if a}}x{{else}}y{{/if}}` is one line because the author
+  wrote it as one line, not because it happens to fit.
+- **Anything the author broke stays broken.** Reflowing it would move rendered whitespace.
 
 ## Install
 
 ```bash
-npm install --save-dev prettier @poliklot/prettier-plugin-handlebars
+npm install --save-dev prettier <path-or-git-url-to-this-fork>
 ```
-
-## Quick Start
-
-Recommended config:
 
 ```js
 /** @type {import("prettier").Config} */
 module.exports = {
-  plugins: ["@poliklot/prettier-plugin-handlebars"],
-  overrides: [
-    {
-      files: ["*.hbs", "*.handlebars"],
-      options: {
-        parser: "handlebars",
-      },
-    },
-  ],
+  plugins: ['@poliklot/prettier-plugin-handlebars'],
+  overrides: [{ files: ['*.hbs', '*.handlebars'], options: { parser: 'handlebars' } }],
 };
 ```
 
-The explicit override keeps `.hbs` files on this plugin even in Prettier versions that also know about other Handlebars-like parsers.
+The `overrides` entry is what makes Prettier pick this parser; without it `.hbs` files are either
+skipped or handed to the HTML parser. See [docs/EDITOR_SETUP.md](./docs/EDITOR_SETUP.md).
 
-## Configuration Patterns
+## What it formats
 
-### 1. Minimal plugin setup
+- HTML elements, void elements, custom elements, comments, `pre` / `textarea` / `script` / `style`
+- `{{mustache}}`, `{{{triple}}}`, `{{! comments }}`, `{{!-- block comments --}}`
+- block helpers, `{{else}}`, `{{else if …}}`, inverted `{{^…}}`
+- partials `{{> name}}`, dynamic partials `{{> (lookup . "n")}}`, block partials `{{#> layout}}`
+- inline partials `{{#*inline "name"}}`, decorators `{{*log}}`
+- Mustache inheritance — `{{< layout}}`, `{{$block}}`
+- raw blocks `{{{{raw}}}}…{{{{/raw}}}}`
+- whitespace control markers, `{{~v~}}`, `{{~#if a~}}`
+- Handlebars inside attribute values, and blocks in attribute position
+- hash params written `k=v`, `k= v` or `k = v`, printed consistently
+- subexpressions to any depth, broken by width all the way down
+- `prettier-ignore`, `prettier-ignore-start` / `-end`
 
-Use this only when you have verified that your Prettier version and editor resolve `.hbs` files to this plugin. The explicit override below is safer for shared projects.
+## Malformed input is rejected
 
-```js
-/** @type {import("prettier").Config} */
-module.exports = {
-  plugins: ["@poliklot/prettier-plugin-handlebars"],
-};
+Everything that opens must close. There is no recovery: a formatter that guesses at a missing
+`}}` prints markup the author did not write, and one that passes a mismatched tag through leaves
+the rest of the file unformatted with nothing to show for it.
+
+```
+$ prettier --write page.hbs
+[error] page.hbs: SyntaxError: unclosed tag: expected </span> (3:3)
+[error]   1 | <div>
+[error]   2 |   <p>x</p>
+[error] > 3 |   <span>y
+[error]     |   ^^^^^^
+[error]   4 | </div>
 ```
 
-### 2. Explicit Handlebars override
+The error carries a source range, so editors can put the cursor on it.
 
-Use this when you want stable format-on-save behavior in editors, or when your project mixes multiple template types.
+This includes the HTML spec's optional end tags: `<ul><li>a<li>b</ul>` is rejected. One rule with
+no list of exceptions beats a list of exceptions that has to be kept in step with the spec.
 
-```js
-/** @type {import("prettier").Config} */
-module.exports = {
-  plugins: ["@poliklot/prettier-plugin-handlebars"],
-  overrides: [
-    {
-      files: ["*.hbs", "*.handlebars"],
-      options: {
-        parser: "handlebars",
-      },
-    },
-  ],
-};
-```
+### When the markup only balances at render time
 
-### 3. Explicit Handlebars override with project style
+Two escape hatches, in order of preference.
 
-Normal Prettier options still work and often matter a lot for `.hbs`.
-
-```js
-/** @type {import("prettier").Config} */
-module.exports = {
-  plugins: ["@poliklot/prettier-plugin-handlebars"],
-  overrides: [
-    {
-      files: ["*.hbs", "*.handlebars"],
-      options: {
-        parser: "handlebars",
-        printWidth: 120,
-        useTabs: true,
-        tabWidth: 4,
-        singleQuote: true,
-        htmlWhitespaceSensitivity: "ignore",
-      },
-    },
-  ],
-};
-```
-
-### 4. Local plugin path during dogfooding
-
-Useful when you are testing the plugin from a neighboring repository before publishing a new npm version.
-
-```js
-/** @type {import("prettier").Config} */
-module.exports = {
-  plugins: ["../prettier-plugin-handlebars/dist/plugin.js"],
-  overrides: [
-    {
-      files: ["*.hbs", "*.handlebars"],
-      options: {
-        parser: "handlebars",
-      },
-    },
-  ],
-};
-```
-
-### 5. JSON config
-
-```json
-{
-  "plugins": ["@poliklot/prettier-plugin-handlebars"],
-  "overrides": [
-    {
-      "files": ["*.hbs", "*.handlebars"],
-      "options": {
-        "parser": "handlebars",
-        "printWidth": 120,
-        "useTabs": true,
-        "tabWidth": 4
-      }
-    }
-  ]
-}
-```
-
-## CLI
-
-Published package:
-
-```bash
-npx prettier --write "src/**/*.{hbs,handlebars}" --plugin @poliklot/prettier-plugin-handlebars --parser handlebars
-```
-
-Local plugin build:
-
-```bash
-npx prettier --write "src/**/*.{hbs,handlebars}" --plugin ../prettier-plugin-handlebars/dist/plugin.js --parser handlebars
-```
-
-## Project Setup Audit
-
-The package also ships a small setup helper:
-
-```bash
-npx @poliklot/prettier-plugin-handlebars init
-```
-
-By default this is a dry run. It reports whether the project has:
-
-- local `prettier` and `@poliklot/prettier-plugin-handlebars` dependencies;
-- a Prettier config that loads the plugin;
-- an explicit `*.hbs` / `*.handlebars` override with `parser: "handlebars"`;
-- `.prettierignore` patterns that skip Handlebars files.
-
-Apply supported JSON config changes with:
-
-```bash
-npx @poliklot/prettier-plugin-handlebars init --write
-```
-
-Use it in CI or local checks with:
-
-```bash
-npx @poliklot/prettier-plugin-handlebars init --check
-```
-
-The helper can create or update `.prettierrc`, `.prettierrc.json`, and the `prettier` object in `package.json`. JavaScript, JSON5, YAML, and TOML configs are detected but not rewritten automatically; the command prints the manual action instead.
-
-## API
-
-```js
-const prettier = require("prettier");
-const plugin = require("@poliklot/prettier-plugin-handlebars");
-
-async function run(source) {
-  return prettier.format(source, {
-    filepath: "template.hbs",
-    parser: "handlebars",
-    plugins: [plugin],
-  });
-}
-```
-
-## Plugin Options
-
-### `dataAttributeOrder`
-
-Custom ordering override for `data-*` attributes.
-
-| Default | CLI Override | API Override |
-| --- | --- | --- |
-| `[]` | `--data-attribute-order <value>` | `dataAttributeOrder: string[]` |
-
-```json
-{
-  "plugins": ["@poliklot/prettier-plugin-handlebars"],
-  "dataAttributeOrder": ["data-testid", "data-state", "data-track"]
-}
-```
-
-### `maxEmptyLines`
-
-Maximum number of consecutive blank lines preserved between nodes.
-
-| Default | CLI Override | API Override |
-| --- | --- | --- |
-| `1` | `--max-empty-lines <int>` | `maxEmptyLines: number` |
-
-```json
-{
-  "plugins": ["@poliklot/prettier-plugin-handlebars"],
-  "maxEmptyLines": 1
-}
-```
-
-### `classAttributeSameLine`
-
-Keep the first and last tokens of multiline conditional `class` attributes glued to their surrounding quotes.
-
-| Default | CLI Override | API Override |
-| --- | --- | --- |
-| `false` | `--class-attribute-same-line` | `classAttributeSameLine: boolean` |
-
-```json
-{
-  "plugins": ["@poliklot/prettier-plugin-handlebars"],
-  "classAttributeSameLine": true
-}
-```
-
-### `classAttributeLayout`
-
-Control whether `class` attribute values may use multiple physical lines. The default `auto` mode preserves the existing formatting rules. Use `single-line` to keep static and conditional class values on one line; the surrounding HTML tag may still wrap.
-
-| Default | CLI Override | API Override |
-| --- | --- | --- |
-| `"auto"` | `--class-attribute-layout <auto\|single-line>` | `classAttributeLayout: "auto" \| "single-line"` |
-
-```json
-{
-  "plugins": ["@poliklot/prettier-plugin-handlebars"],
-  "classAttributeLayout": "single-line"
-}
-```
-
-`classAttributeLayout: "single-line"` takes precedence over `classAttributeSameLine`, whose existing behavior remains unchanged.
-
-## What The Plugin Handles Today
-
-- HTML elements, void elements, comments, and custom elements
-- `{{mustache}}`, `{{{triple-stash}}}`, block helpers, `{{else}}`, `{{else if ...}}`, partials
-- whitespace control markers such as `{{~ value ~}}` and `{{~/if~}}`
-- raw blocks such as `{{{{raw}}}}...{{{{/raw}}}}`
-- block partials such as `{{#> layout}}...{{/layout}}`
-- inline partial definitions such as `{{#*inline "name"}}...{{/inline}}`
-- Mustache inheritance with parent templates and block overrides, such as `{{< layout}}...{{$title}}...{{/title}}{{/layout}}`
-- Handlebars inside attribute values
-- unquoted mustache attribute values such as `src={{ imgSrc }}`
-- Handlebars blocks that emit attributes
-- multiline class formatting with conditional modifiers
-- comparison helper operators such as `{{#ifCompare a '===' b}}`
-- hash params written as `key=value`, `key= value`, or `key = value`
-- long helper and partial calls with nested subexpressions
-- `prettier-ignore`, `prettier-ignore-start`, `prettier-ignore-end`
-- root-level plain-text templates with inline mustaches
-- embedded JavaScript / CSS formatting for plain `script` / `style` tags
-- raw `script` / `style` preservation when content contains Handlebars or non-JS/CSS types
-- literal `pre` / `textarea` text preservation
-- unmatched / incomplete structures preserved as raw nodes instead of crashing
-- recovery for some broken formatter output, such as split dynamic attribute names
-
-## Real-World Examples
-
-### `else if` chains
+Hide the markup behind a call, so the parser sees balanced source and the browser still gets what
+you meant:
 
 ```hbs
-{{#if primary}}
-  Primary
-{{else if secondary}}
-  Secondary
-{{else}}
-  Fallback
-{{/if}}
+{{#if twoColumns}}{{{concat '<div class="row">'}}}{{/if}}
+  …
+{{#if twoColumns}}{{{concat '</div>'}}}{{/if}}
 ```
 
-### Conditional class values
+Or fence the region off entirely. Nothing inside is parsed, so nothing inside can be rejected:
 
 ```hbs
-<div
-  class="
-    card
-    {{#if isPrimary}}
-      card--primary
-    {{else if isSecondary}}
-      card--secondary
-    {{/if}}
-  "
-></div>
+{{! prettier-ignore-start }}
+<div>deliberately unbalanced
+{{! prettier-ignore-end }}
 ```
 
-### Partial params with relaxed spacing
+## Options
 
-```hbs
-{{> 'ui/input-primary/input-primary'
-  id='compare-family-name'
-  type='text'
-  placeholder='Family name'
-}}
-```
-
-The parser accepts common source styles such as `id= 'value'` and `type = 'text'`, then prints them consistently as hash params.
-
-### Mustache parent templates
-
-The formatter is still Handlebars-first, but it also understands Mustache inheritance syntax used by projects such as Moodle:
-
-```mustache
-{{< theme_boost/drawer}}
-  {{$drawerclasses}}{{{ classes }}}{{/drawerclasses}}
-  {{$id}}{{{ id }}}{{/id}}
-  {{$drawercontent}}{{{ content }}}{{/drawercontent}}
-{{/theme_boost/drawer}}
-```
-
-Parent tags (`{{< layout}}`) stay expanded, while simple override blocks (`{{$name}}...{{/name}}`) can stay compact. This avoids the old behavior where `{{$name}}` was treated as a simple mustache and printed as `{{ $name }}`.
-
-### Classic comparison helpers
-
-```hbs
-{{#ifCompare ../activeIndex '===' @index}}
-  active
-{{/ifCompare}}
-```
-
-Operators like `'==='`, `'!=='`, `'>'`, and `'<'` are kept as positional params instead of being mistaken for hash pairs.
-
-## Current Limits
-
-This is a `0.x` formatter focused on classic Handlebars.
-
-Known limits:
-
-- embedded JavaScript / CSS formatting is conservative and only runs for plain safe `script` / `style` content
-- Glimmer / Ember-only syntax is treated as stress input, not as a compatibility target
-- exact byte-level fixtures, such as BOM / no-final-newline tests, may still need project-level `prettier-ignore`
+None. `printWidth`, `tabWidth`, `useTabs` and `singleQuote` are read from Prettier's core config;
+this plugin adds nothing.
 
 ## Development
 
 ```bash
 npm ci
-npm run build
-npm test
+npm run check        # build + tests + both fuzz gates
+npm run corpus:diff  # what the formatter would do to a corpus, for reading by eye
 ```
 
-Useful scripts:
+`npm run check` runs 221 tests plus two fuzz gates, each two-sided: 429 generated cases must
+format idempotently without losing source, and 17 malformed cases must be refused with a
+location.
 
-- `npm run build` - compile the plugin into `dist/`
-- `npm test` - run the full automated suite
-- `npm run check` - build + test + deterministic fuzz check
-- `npm run corpus:check -- <path> [more-paths...]` - run an idempotence / crash-safety sweep over real template corpora
-- `npm run corpus:oss` - clone and check a public OSS corpus from Ghost themes, Ghost classic templates, WET, `express-hbs`, `pillarjs/hbs`, and other real `.hbs` projects
-- `npm run fuzz:parser` - run deterministic malformed-template fuzzing against the built plugin
-- `npm run format:hbs-tree -- <path>` - format every `.hbs` / `.handlebars` file under a temp project copy before running that project's own build
-- `PRETTIER_VERSION=3.2 npm run smoke:install` - pack the plugin, install it into a clean temp project, format a sample, and verify that `handlebars` is not installed
-- `npm run pack:check` - inspect npm package contents with `npm pack --dry-run`
+`scripts/run-property-gate.mjs` checks the five properties over a real corpus:
 
-## VS Code Companion
+```bash
+node scripts/run-property-gate.mjs --git ../your-repo --width 95 path/to/templates
+```
 
-If you work with Handlebars in VS Code, try [HBS Master](https://marketplace.visualstudio.com/items?itemName=poliklot.hbs-master) as a companion extension. It pairs well with this formatter and makes day-to-day `.hbs` editing more comfortable.
+The sixth gate is a person reading `corpus:diff`. The property gates prove correctness; they
+cannot see bad taste, which is the failure mode that actually matters here.
 
-For formatter setup details, see [Editor Setup](./docs/EDITOR_SETUP.md).
+[REWRITE-PLAN.md](./REWRITE-PLAN.md) is the design record — why the printer looks like this, and
+what the previous one got wrong.
 
-## Troubleshooting and Migration
+## Docs
 
+- [Editor setup](./docs/EDITOR_SETUP.md)
 - [Troubleshooting](./docs/TROUBLESHOOTING.md)
-- [Editor Setup](./docs/EDITOR_SETUP.md)
-- [Migration Notes](./docs/MIGRATION.md)
-- [Changelog](./CHANGELOG.md)
-- [Release Automation](./docs/RELEASE_AUTOMATION.md)
-
-## Notes
-
-- This README is intentionally self-contained so it works well on npm too.
-- If your editor does not format `.hbs` on save, the safest setup is an explicit `overrides` rule with `parser: "handlebars"`.

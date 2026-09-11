@@ -1,6 +1,6 @@
 # Printer rewrite plan
 
-Status: in progress (phases 0-6.2 done). Branch: `feat/printer-v2`, cut from the tip of `master`.
+Status: in progress (phases 0-6.3 done). Branch: `feat/printer-v2`, cut from the tip of `master`.
 `feat/style-options` stays as the record of what not to do.
 
 ## 1. What went wrong, precisely
@@ -281,6 +281,7 @@ come up quickly.
 | 6 | Printer: blocks, partials, decorators, else-chains, raw blocks. | syntax-coverage table | every corpus file formattable; full syntax table green; diff read |
 | 6.1 | Simplification pass over `printer.ts`, `expression.ts`, `call-shape.ts`. | unchanged | output byte-identical over the corpus; printer 506 → 441 lines |
 | 6.2 | **Refuse malformed input.** Every construct that opens must close; the parser throws with a location instead of recovering silently. | `test/syntax-errors.test.ts`; both fuzz gates become two-sided | corpus still byte-identical; every reject category covered |
+| 6.3 | Attribute values are whitespace-significant all the way down, so a block's body in a value is no longer laid out at the printer's indent level. | three in `printer-elements.test.ts`; two fuzz atoms | value bytes survive at any nesting depth; corpus still byte-identical |
 | 7 | Differential against `prettier-hbs` on the corpus. | — | every divergence listed and justified as deliberate |
 | 8 | Corpus migration, chunked by directory. | — | each chunk reviewed by eye before the next |
 
@@ -317,6 +318,39 @@ Escape hatches, both already in use and both preserved:
 `UnmatchedNode` keeps only its four honest verbatim jobs: closed raw blocks, closed ignore
 regions, dynamic elements, unsupported mustache kinds. `shouldPreserveUnclosedBlockRemainder`
 existed only to choose between the first two shapes above and is gone.
+
+### 8.2 Why phase 6.3 exists
+
+An attribute value's text was emitted as a plain JS string holding literal `\n`. Prettier's doc
+printer copies those through without learning that a line ended, so it never resets its column. A
+block in the same value emitted real `hardline`s, which *do* re-indent — to the printer's own doc
+level, which has nothing to do with the column the value sits at. The two halves of one value were
+laid out by two unrelated notions of "what column am I at":
+
+```hbs
+<div class="            →  <div
+        a                    class="
+        {{#if x}}                    a          ← author's column, kept
+          b                          {{#if x}}  ← author's column, kept
+        {{/if}}                b                ← printer's indent, 4
+"></div>                     {{/if}}            ← printer's indent, 2
+```
+
+That is a §3 violation: for `class` the browser re-tokenises and nothing shows, but for `title`,
+`alt` or any `data-*` read back verbatim the rendered string changes.
+
+Three gates missed it independently, which is the part worth remembering:
+
+- **idempotence** — the change happens once and the result is stable, so pass two is a no-op
+- **the corpus** — 27 blocks inside attribute values, all single-line, zero multi-line
+- **the fuzz corpus** — its one attribute-value atom was single-line too
+
+The fix is one rule rather than a special case: the parser marks every text node inside an
+attribute value `preserveWhitespace`, at any depth, because every space in a value renders. The
+printer already knows what to do with that flag — `literalline`, which resets to column 0 and
+leaves trailing spaces alone — so `printAttribute` stopped special-casing text and routes every
+part through `printAny`. Prettier now also sees where the value's lines end, so width measurement
+over multi-line values is correct for the first time.
 
 ## 9. Risks
 

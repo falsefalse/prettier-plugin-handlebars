@@ -1184,7 +1184,28 @@ function parseAttributeValueParts(
     pos = end;
   }
 
+  preserveValueWhitespace(parts);
+
   return parts;
+}
+
+/**
+ * An attribute value is a string, so every space in it renders - including the spaces inside a
+ * block's body. Without this the printer lays that body out at its own indent level, which is
+ * unrelated to the column the value sits at, and rewrites whitespace the author owns.
+ */
+function preserveValueWhitespace(nodes: Node[]): void {
+  for (const node of nodes) {
+    if (node.type === 'TextNode') {
+      node.preserveWhitespace = true;
+    } else if (node.type === 'BlockStatement') {
+      preserveValueWhitespace(node.program.body);
+      (node.inverseChain ?? []).forEach((branch) => preserveValueWhitespace(branch.program.body));
+      preserveValueWhitespace(node.inverse.body);
+    } else if (node.type === 'ElementNode') {
+      preserveValueWhitespace(node.children);
+    }
+  }
 }
 
 function readQuotedAttributeValue(

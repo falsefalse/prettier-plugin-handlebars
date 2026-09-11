@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { parse as parseTemplate } from './parser';
-import { flattenCalls } from '../test/call-shape';
+import { parse as parseTemplate } from '../src/parser';
+import { flattenCalls } from './call-shape';
 
 /* Calls read as strings here; expression.test.ts covers the node shape. */
 const parse = (source: string) => flattenCalls(parseTemplate(source));
