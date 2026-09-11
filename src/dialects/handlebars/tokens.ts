@@ -1,13 +1,13 @@
 import { scanPastQuotes } from '../../core/scan';
 import * as whitespace from '../../core/whitespace';
 
-export type TokenKind = 'blockStart' | 'blockEnd' | 'partial' | 'comment' | 'mustache' | 'else';
+type TokenKind = 'blockStart' | 'blockEnd' | 'partial' | 'comment' | 'mustache' | 'else';
 
 /** How a block opens, which is also how its closer and its `{{else}}` are spelled. */
-export type BlockPrefix = '#' | '#>' | '#*' | '^' | '<' | '$';
+type BlockPrefix = '#' | '#>' | '#*' | '^' | '<' | '$';
 
 /** A form the printer reproduces but the parser treats as its plain counterpart. */
-export type SpecialForm =
+type SpecialForm =
   | 'blockPartial'
   | 'decoratorBlock'
   | 'decorator'

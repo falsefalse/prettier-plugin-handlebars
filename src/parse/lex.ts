@@ -248,12 +248,12 @@ export function readName(text: string, position: number): { value: string; next:
   return { value: text.slice(position, pos), next: pos };
 }
 
-export function isSelfClosingSlash(text: string, position: number): boolean {
+function isSelfClosingSlash(text: string, position: number): boolean {
   return text[position] === '/' && text[position + 1] === '>';
 }
 
 /** Whether the character before `index`, whitespace aside, is `=`. */
-export function follows(text: string, index: number, char: string): boolean {
+function follows(text: string, index: number, char: string): boolean {
   let at = index - 1;
   while (at >= 0 && whitespace.html.test(text[at])) at -= 1;
 

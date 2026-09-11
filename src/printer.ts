@@ -29,7 +29,7 @@ const MAX_HARDLINES = 2;
 /** Only prettier's core options reach the printer; this formatter is opinionated. */
 /* Only what the printer actually reads. Width and indentation are the doc printer's business,
  * not ours - listing them here just invited code that reached for them directly. */
-export type PrintOptions = Pick<ParserOptions<Node>, 'singleQuote'> & {
+type PrintOptions = Pick<ParserOptions<Node>, 'singleQuote'> & {
   /** Quote holding the value being printed into. Unusable by anything nested in it. */
   enclosingQuote?: '"' | "'";
 };

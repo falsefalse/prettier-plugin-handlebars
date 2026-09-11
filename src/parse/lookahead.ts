@@ -207,7 +207,7 @@ export function findCurrentBlockBoundary(text: string, position: number, endBloc
 
 /* Past one mustache, or past a whole raw block: a raw block's body is emitted literally, so the
  * markup inside it is not markup either. Never returns `position`, so callers cannot spin. */
-export function skipMustache(text: string, position: number): number {
+function skipMustache(text: string, position: number): number {
   const rawBlockEnd = consumeRawBlock(text, position);
   if (rawBlockEnd !== null && rawBlockEnd > position) {
     return rawBlockEnd;

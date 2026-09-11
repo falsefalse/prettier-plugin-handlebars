@@ -26,7 +26,7 @@ export interface AttributeValue extends SourceRange {
 }
 
 /** Everything that can stand in attribute position, or inside a value alongside its text. */
-export type AttributeBlockNode =
+type AttributeBlockNode =
   | MustacheStatement
   | BlockStatement
   | PartialStatement

@@ -14,7 +14,7 @@ import type {
   UnmatchedNode,
 } from '../types';
 
-export type PrettierIgnoreDirective = 'next' | 'start' | 'end' | null;
+type PrettierIgnoreDirective = 'next' | 'start' | 'end' | null;
 
 /**
  * The directive has to *be* the comment, not appear somewhere inside it: on `includes`, a
@@ -70,7 +70,7 @@ export function contentOffset(text: string, tagStart: number, tagEnd: number, co
 }
 
 /* The parts every inline statement shares: its call, and the `~` markers on its delimiters. */
-export function statementBase(text: string, token: MustacheToken, position: number, rangeOffset: number, content: string) {
+function statementBase(text: string, token: MustacheToken, position: number, rangeOffset: number, content: string) {
   return {
     ...parseCall(content, rangeOffset + contentOffset(text, position, token.end, content)),
     ...(token.trimOpen ? { trimOpen: true } : {}),
