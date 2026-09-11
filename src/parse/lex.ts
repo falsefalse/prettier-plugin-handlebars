@@ -34,6 +34,14 @@ export function startsTemplateTag(text: string, position: number): boolean {
  * was written to protect. `terminated` is false when the tag ran to EOF, which is also how an
  * unterminated attribute value shows up.
  */
+/**
+ * Past the mustache at `position`. A token reporting an end at or before where it started would
+ * leave the caller's loop standing still, so the opening delimiter is the smallest step taken.
+ */
+export function skipTemplateTag(text: string, position: number): number {
+  return Math.max(parseMustacheToken(text, position).end, position + 2);
+}
+
 export function scanTag(
   text: string,
   position: number,
@@ -61,8 +69,7 @@ export function scanTag(
 
   while (pos < text.length) {
     if (startsTemplateTag(text, pos)) {
-      const token = parseMustacheToken(text, pos);
-      pos = token.end > pos ? token.end : pos + 2;
+      pos = skipTemplateTag(text, pos);
       continue;
     }
 
@@ -170,8 +177,7 @@ export function readUnquotedValueEnd(text: string, position: number): number {
 
   while (pos < text.length && text[pos] !== '>' && !whitespace.html.test(text[pos])) {
     if (startsTemplateTag(text, pos)) {
-      const token = parseMustacheToken(text, pos);
-      pos = token.end > pos ? token.end : pos + 2;
+      pos = skipTemplateTag(text, pos);
       continue;
     }
 
@@ -208,8 +214,7 @@ export function readQuotedAttributeValue(
 
   while (pos < text.length) {
     if (startsTemplateTag(text, pos)) {
-      const token = parseMustacheToken(text, pos);
-      pos = token.end > pos ? token.end : pos + 2;
+      pos = skipTemplateTag(text, pos);
       continue;
     }
 

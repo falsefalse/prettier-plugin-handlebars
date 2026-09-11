@@ -319,6 +319,19 @@ function parseElementChild(
     return end;
   }
 
+  return parseElement(text, pos, endTag, blockBoundary, rangeOffset, nodes);
+}
+
+/* Split from `parseElementChild` so the three things that open with `<` and are not an element -
+ * a declaration, a comment, a bare `<` - stay out of the way of the one that is. */
+function parseElement(
+  text: string,
+  pos: number,
+  endTag: string | null,
+  blockBoundary: number,
+  rangeOffset: number,
+  nodes: Node[],
+): ChildStep {
   const tagResult = parseTag(text, pos, rangeOffset);
 
   if (!tagResult.terminated) {
@@ -754,12 +767,8 @@ function parseDynamicAttribute(
 }
 
 function createAttribute(name: string, rawValue: string | null, valueStart?: number): ElementAttribute {
-  if (rawValue == null) {
-    return {
-      type: 'Attribute',
-      name,
-      value: null,
-    };
+  if (rawValue === null) {
+    return { type: 'Attribute', name, value: null };
   }
 
   const value: AttributeValue = {
@@ -767,16 +776,9 @@ function createAttribute(name: string, rawValue: string | null, valueStart?: num
     parts: parseAttributeValueParts(rawValue, valueStart ?? 0),
     raw: rawValue,
   };
+  const valueEnd = valueStart === undefined ? undefined : valueStart + rawValue.length;
 
-  return {
-    type: 'Attribute',
-    name,
-    value: withOptionalRange(
-      value,
-      valueStart,
-      typeof valueStart === 'number' ? valueStart + rawValue.length : undefined,
-    ),
-  };
+  return { type: 'Attribute', name, value: withOptionalRange(value, valueStart, valueEnd) };
 }
 
 function createRawAttribute(raw: string): ElementAttribute {

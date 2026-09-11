@@ -4,7 +4,15 @@ import { isRawTextElement } from '../core/html';
 import { fail } from '../core/errors';
 import { handlebarsDialect, handlebarsRawBlockCloser, handlebarsRawBlockName } from '../dialects/handlebars/tokens';
 import type { HandlebarsToken as MustacheToken } from '../dialects/handlebars/tokens';
-import { consumeTagLikeChunk, isTagStart, sameTag, scanTag, startsTemplateTag, tagNameTerminator } from './lex';
+import {
+  consumeTagLikeChunk,
+  isTagStart,
+  sameTag,
+  scanTag,
+  skipTemplateTag,
+  startsTemplateTag,
+  tagNameTerminator,
+} from './lex';
 
 export const {
   openDelimiter,
@@ -213,7 +221,7 @@ function skipMustache(text: string, position: number): number {
     return rawBlockEnd;
   }
 
-  return Math.max(parseMustacheToken(text, position).end, position + 2);
+  return skipTemplateTag(text, position);
 }
 
 export function findMatchingTagClose(text: string, tag: string, position: number, limit = -1): number | null {
