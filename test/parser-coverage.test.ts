@@ -196,22 +196,13 @@ describe('simple parser coverage', () => {
     });
   });
 
-  it('preserves invalid closing tags on void elements as unmatched source', () => {
-    const node = firstNode<UnmatchedNode>('<br></br>');
-
-    expect(node).toEqual({
-      type: 'UnmatchedNode',
-      raw: '<br></br>',
-    });
+  /* Both of these used to come back as UnmatchedNode; syntax-errors.test.ts owns them now. */
+  it('rejects a closing tag on a void element', () => {
+    expect(() => parseTemplate('<br></br>')).toThrow(/void element/u);
   });
 
-  it('preserves malformed block partials as unmatched source', () => {
-    const node = firstNode<UnmatchedNode>('{{#> layout}}\n  <main>{{body}}</main>');
-
-    expect(node).toEqual({
-      type: 'UnmatchedNode',
-      raw: '{{#> layout}}\n  <main>{{body}}</main>',
-    });
+  it('rejects a block partial that is never closed', () => {
+    expect(() => parseTemplate('{{#> layout}}\n  <main>{{body}}</main>')).toThrow(/expected \{\{\/layout\}\}/u);
   });
 
   it('parses dynamic attribute names as raw attributes', () => {

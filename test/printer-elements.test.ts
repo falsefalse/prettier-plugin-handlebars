@@ -104,10 +104,15 @@ describe('partials and decorators', () => {
 });
 
 describe('recovery', () => {
-  /* Left in the raw text, a trailing newline is reprinted *and* re-added as the file's line
-   * ending, so the file grows by one newline on every pass. */
-  it('is idempotent on unclosed constructs', async () => {
-    await expectStable('{{{{raw}}}}<div>{{ notParsed }}</div>', '{{{{raw}}}}<div>{{ notParsed }}</div>\n');
-    await expectStable('{{#> layout}}\n  <main>{{body}}</main>', '{{#> layout}}\n  <main>{{body}}</main>\n');
+  /* A closed raw block is content the author asked to be left alone. Left in the raw text, its
+   * trailing newline would be reprinted *and* re-added as the file's line ending, growing the
+   * file by one newline on every pass. Unclosed constructs are rejected, not recovered - see
+   * syntax-errors.test.ts. */
+  it('is idempotent on raw blocks and ignored regions', async () => {
+    await expectStable('{{{{raw}}}}<div>{{ notParsed }}</div>{{{{/raw}}}}', '{{{{raw}}}}<div>{{ notParsed }}</div>{{{{/raw}}}}\n');
+    await expectStable(
+      '{{! prettier-ignore-start }}\n<div   a=1>\n{{! prettier-ignore-end }}',
+      '{{! prettier-ignore-start }}\n<div   a=1>\n{{! prettier-ignore-end }}\n',
+    );
   });
 });

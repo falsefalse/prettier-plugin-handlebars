@@ -16,6 +16,7 @@ import {
 import { voidElements, rawTextElements, whitespaceSensitiveRawTextElements } from 'template-format-core';
 import { locEnd, locStart, normalizeInput, withOptionalRange, withRange } from 'template-format-core';
 import { parseCall } from './expression';
+import { TemplateSyntaxError } from './errors';
 import type { TemplateToken as MustacheToken } from 'template-format-core';
 import { whitespace } from 'template-format-core';
 import { handlebarsDialect } from './dialects/handlebars/tokens';
@@ -35,8 +36,52 @@ const templateDialect = handlebarsDialect;
 
 export function parse(text: string): Program {
   const normalizedText = normalizeInput(text);
-  const { nodes } = parseChildren(normalizedText, 0, null, null);
-  return withRange({ type: 'Program', body: nodes }, 0, normalizedText.length);
+
+  try {
+    const { nodes } = parseChildren(normalizedText, 0, null, null);
+    return withRange({ type: 'Program', body: nodes }, 0, normalizedText.length);
+  } catch (error) {
+    /* Offsets become line and column here, where the whole text is still in hand. */
+    throw error instanceof TemplateSyntaxError ? error.locate(normalizedText) : error;
+  }
+}
+
+/**
+ * Every malformed construct ends here. A formatter that guesses at a missing delimiter prints
+ * markup the author did not write; one that passes a mismatched tag through leaves the rest of
+ * the file unformatted with nothing to show for it. Refusing is the only honest option, and the
+ * offsets let an editor put the cursor on the offending place.
+ */
+function fail(message: string, start: number, end: number): never {
+  throw new TemplateSyntaxError(message, start, end);
+}
+
+/* The dialect reports an unterminated token as one that ends at EOF, which is also what a token
+ * ending the file looks like; the closing delimiter is what tells them apart. */
+function isTerminatedToken(text: string, token: MustacheToken): boolean {
+  const close = token.triple ? '}}}' : '}}';
+  const delimiter = text.startsWith('{{!--', token.start) || text.startsWith('{{{!--', token.start) ? `--${close}` : close;
+
+  return token.end - delimiter.length >= token.start && text.startsWith(delimiter, token.end - delimiter.length);
+}
+
+/* Same for raw blocks, except the closer carries the block's own name. */
+function isTerminatedRawBlock(text: string, start: number, end: number): boolean {
+  const openEnd = text.indexOf('}}}}', start + 4);
+  if (openEnd === -1) {
+    return false;
+  }
+
+  const name = rawBlockName(text, start, openEnd);
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+
+  return new RegExp(`\\{\\{\\{\\{\\s*~?\\s*/\\s*${escaped}\\s*~?\\s*\\}\\}\\}\\}$`, 'u').test(text.slice(start, end));
+}
+
+function rawBlockName(text: string, start: number, openEnd: number): string {
+  const inner = text.slice(start + 4, openEnd).trim().replace(/^~/u, '').replace(/~$/u, '').trim();
+
+  return inner.split(/\s+/u)[0] ?? '';
 }
 
 function startsTemplateTag(text: string, position: number): boolean {
@@ -90,6 +135,10 @@ function parseChildren(
     }
 
     const closeIdx = closeStart >= 0 ? text.indexOf('>', closeStart) : -1;
+    if (closeStart >= 0 && closeIdx < 0) {
+      fail("unterminated tag: expected '>'", rangeOffset + closeStart, rangeOffset + text.length);
+    }
+
     const nextPos = closeIdx >= 0 ? closeIdx + 1 : contentEnd;
 
     return { nodes, position: nextPos, endReason: closeStart >= 0 ? 'tagClose' : null, contentEnd };
@@ -98,6 +147,12 @@ function parseChildren(
   while (pos < text.length) {
     const rawBlockEnd = consumeRawBlock(text, pos);
     if (rawBlockEnd !== null) {
+      if (!isTerminatedRawBlock(text, pos, rawBlockEnd)) {
+        const openEnd = text.indexOf('}}}}', pos + 4);
+        const name = openEnd === -1 ? '' : rawBlockName(text, pos, openEnd);
+        fail(`unterminated raw block: expected {{{{/${name}}}}}`, rangeOffset + pos, rangeOffset + rawBlockEnd);
+      }
+
       nodes.push(createUnmatchedNode(text, pos, rawBlockEnd));
       pos = rawBlockEnd;
       continue;
@@ -113,12 +168,25 @@ function parseChildren(
     if (endTag && text.startsWith(`</${endTag}`, pos)) {
       const contentEnd = pos;
       const closeIdx = text.indexOf('>', pos);
-      pos = closeIdx >= 0 ? closeIdx + 1 : text.length;
+      if (closeIdx < 0) {
+        fail("unterminated tag: expected '>'", rangeOffset + pos, rangeOffset + text.length);
+      }
+
+      pos = closeIdx + 1;
       return { nodes, position: pos, endReason: 'tagClose', contentEnd };
     }
 
     if (startsTemplateTag(text, pos)) {
       const token = parseMustacheToken(text, pos);
+
+      if (!isTerminatedToken(text, token)) {
+        const [open, close] = text.startsWith('{{!--', pos)
+          ? ['{{!--', '--}}']
+          : token.triple
+            ? ['{{{', '}}}']
+            : [text.startsWith('{{!', pos) ? '{{!' : '{{', '}}'];
+        fail(`unterminated ${open}: expected ${close}`, rangeOffset + pos, rangeOffset + token.end);
+      }
 
       if (shouldPreserveMustacheVerbatim(token) && !(endBlock && token.kind === 'else')) {
         const preserveEnd =
@@ -134,10 +202,17 @@ function parseChildren(
         if (ignoreDirective === 'start') {
           const ignoreStart = pos;
           const ignoreEnd = findPrettierIgnoreEnd(text, token.end);
-          const finalIgnoredEnd = ignoreEnd ?? text.length;
 
-          nodes.push(createUnmatchedNode(text, ignoreStart, finalIgnoredEnd));
-          pos = finalIgnoredEnd;
+          if (ignoreEnd === null) {
+            fail(
+              'unterminated prettier-ignore region: expected {{! prettier-ignore-end }}',
+              rangeOffset + ignoreStart,
+              rangeOffset + token.end,
+            );
+          }
+
+          nodes.push(createUnmatchedNode(text, ignoreStart, ignoreEnd));
+          pos = ignoreEnd;
           continue;
         }
 
@@ -163,17 +238,12 @@ function parseChildren(
 
       if (token.kind === 'blockStart') {
         if (!hasMatchingBlockEnd(text, token, pos)) {
-          const preserveEnd = shouldPreserveUnclosedBlockRemainder(token) ? text.length : token.end;
-          nodes.push(createUnmatchedNode(text, pos, preserveEnd));
-          pos = preserveEnd;
-          continue;
+          fail(`unclosed block: expected {{/${token.name ?? ''}}}`, rangeOffset + pos, rangeOffset + token.end);
         }
 
         const { node, next, closed } = parseBlock(text, token, rangeOffset);
         if (!closed) {
-          nodes.push(createUnmatchedNode(text, pos, next));
-          pos = next;
-          continue;
+          fail(`unclosed block: expected {{/${token.name ?? ''}}}`, rangeOffset + pos, rangeOffset + token.end);
         }
 
         nodes.push(node);
@@ -182,16 +252,13 @@ function parseChildren(
       }
 
       if (token.kind === 'blockEnd') {
-        // Unmatched end, treat as text to avoid crash
-        nodes.push(
-          withRange(
-            { type: 'TextNode', chars: text.slice(pos, token.end) } as TextNode,
-            rangeOffset + pos,
-            rangeOffset + token.end,
-          ),
+        fail(
+          endBlock
+            ? `unexpected {{/${token.name ?? ''}}}: expected {{/${endBlock}}}`
+            : `unexpected {{/${token.name ?? ''}}}: no block is open`,
+          rangeOffset + pos,
+          rangeOffset + token.end,
         );
-        pos = token.end;
-        continue;
       }
 
       if (token.kind === 'partial') {
@@ -258,7 +325,11 @@ function parseChildren(
 
       if (text.startsWith('<!--', pos)) {
         const closeIdx = text.indexOf('-->', pos + 4);
-        const end = closeIdx >= 0 ? closeIdx + 3 : text.length;
+        if (closeIdx < 0) {
+          fail("unterminated HTML comment: expected '-->'", rangeOffset + pos, rangeOffset + text.length);
+        }
+
+        const end = closeIdx + 3;
 
         nodes.push(
           withRange(
@@ -273,6 +344,10 @@ function parseChildren(
 
       const tagResult = parseTag(text, pos);
 
+      if (!tagResult.terminated) {
+        fail("unterminated tag: expected '>'", rangeOffset + pos, rangeOffset + tagResult.end);
+      }
+
       if (tagResult.kind === 'close') {
         if (endTag && tagResult.tag === endTag) {
           const contentEnd = pos;
@@ -280,23 +355,23 @@ function parseChildren(
           return { nodes, position: pos, endReason: 'tagClose', contentEnd };
         }
 
-        nodes.push(
-          withRange(
-            { type: 'TextNode', chars: text.slice(pos, tagResult.end), verbatim: true } as TextNode,
-            rangeOffset + pos,
-            rangeOffset + tagResult.end,
-          ),
+        fail(
+          endTag
+            ? `unexpected </${tagResult.tag}>: expected </${endTag}>`
+            : `unexpected </${tagResult.tag}>: no tag is open`,
+          rangeOffset + pos,
+          rangeOffset + tagResult.end,
         );
-        pos = tagResult.end;
-        continue;
       }
 
       if (tagResult.kind === 'selfClosing') {
         const invalidVoidCloseEnd = consumeInvalidVoidElementClose(text, tagResult.end, tagResult.tag);
         if (invalidVoidCloseEnd !== null) {
-          nodes.push(createUnmatchedNode(text, pos, invalidVoidCloseEnd));
-          pos = invalidVoidCloseEnd;
-          continue;
+          fail(
+            `<${tagResult.tag}> is a void element and cannot be closed`,
+            rangeOffset + tagResult.end,
+            rangeOffset + invalidVoidCloseEnd,
+          );
         }
 
         nodes.push(
@@ -319,9 +394,7 @@ function parseChildren(
       const blockBoundary = endBlock ? findCurrentBlockBoundary(text, tagResult.end, endBlock) : -1;
 
       if (!hasMatchingTagEnd(text, tagResult.tag, tagResult.end, blockBoundary)) {
-        nodes.push(createUnmatchedNode(text, pos, tagResult.end));
-        pos = tagResult.end;
-        continue;
+        fail(`unclosed tag: expected </${tagResult.tag}>`, rangeOffset + pos, rangeOffset + tagResult.end);
       }
 
       const {
@@ -331,9 +404,7 @@ function parseChildren(
         contentEnd,
       } = parseChildren(text, tagResult.end, tagResult.tag, null, rangeOffset);
       if (childEndReason !== 'tagClose') {
-        nodes.push(createUnmatchedNode(text, pos, newPos));
-        pos = newPos;
-        continue;
+        fail(`unclosed tag: expected </${tagResult.tag}>`, rangeOffset + pos, rangeOffset + tagResult.end);
       }
 
       nodes.push(
@@ -527,10 +598,6 @@ function getBlockPrefix(token: MustacheToken): '#' | '#>' | '#*' | '^' | '<' | '
   return templateDialect.getBlockPrefix(token);
 }
 
-function shouldPreserveUnclosedBlockRemainder(token: MustacheToken): boolean {
-  return templateDialect.shouldPreserveUnclosedBlockRemainder(token);
-}
-
 function hasMatchingTagEnd(text: string, tag: string, start: number, limit = -1): boolean {
   return findMatchingTagClose(text, tag, start, limit) !== null;
 }
@@ -626,17 +693,22 @@ function createUnmatchedNode(text: string, start: number, end: number): Unmatche
   return withRange({ type: 'UnmatchedNode', raw: text.slice(start, end) }, start, end);
 }
 
+/**
+ * `terminated` is false when the tag ran to EOF without a `>`, which is also how an unterminated
+ * attribute value shows up. It is reported rather than thrown because the lookahead scanners call
+ * this too, and a throw from a predicate would surface a later problem than the author's.
+ */
 function parseTag(text: string, position: number):
-  | { kind: 'open'; tag: string; attributes: ElementAttribute[]; end: number }
-  | { kind: 'selfClosing'; tag: string; attributes: ElementAttribute[]; end: number }
-  | { kind: 'close'; tag: string; end: number } {
+  | { kind: 'open'; tag: string; attributes: ElementAttribute[]; end: number; terminated: boolean }
+  | { kind: 'selfClosing'; tag: string; attributes: ElementAttribute[]; end: number; terminated: boolean }
+  | { kind: 'close'; tag: string; end: number; terminated: boolean } {
   let pos = position + 1; // skip '<'
 
   if (text[pos] === '/') {
     pos += 1;
     const { value: tag, next } = readName(text, pos);
     const closeIdx = text.indexOf('>', next);
-    return { kind: 'close', tag, end: closeIdx >= 0 ? closeIdx + 1 : text.length };
+    return { kind: 'close', tag, end: closeIdx >= 0 ? closeIdx + 1 : text.length, terminated: closeIdx >= 0 };
   }
 
   const { value: tag, next } = readName(text, pos);
@@ -736,13 +808,13 @@ function parseTag(text: string, position: number):
     if (text[pos] === '/' && text[pos + 1] === '>') {
       pos += 2;
       const normalizedAttributes = normalizeTagAttributes(attributes);
-      return { kind: 'selfClosing', tag, attributes: normalizedAttributes, end: pos };
+      return { kind: 'selfClosing', tag, attributes: normalizedAttributes, end: pos, terminated: true };
     }
     if (text[pos] === '>') {
       pos += 1;
       const kind = voidElements.has(tag.toLowerCase()) ? 'selfClosing' : 'open';
       const normalizedAttributes = normalizeTagAttributes(attributes);
-      return { kind, tag, attributes: normalizedAttributes, end: pos };
+      return { kind, tag, attributes: normalizedAttributes, end: pos, terminated: true };
     }
 
     const beforeAttr = pos;
@@ -763,7 +835,7 @@ function parseTag(text: string, position: number):
 
   const kind = voidElements.has(tag.toLowerCase()) ? 'selfClosing' : 'open';
   const normalizedAttributes = normalizeTagAttributes(attributes);
-  return { kind, tag, attributes: normalizedAttributes, end: pos };
+  return { kind, tag, attributes: normalizedAttributes, end: pos, terminated: false };
 }
 
 function consumeInvalidVoidElementClose(text: string, position: number, tag: string): number | null {

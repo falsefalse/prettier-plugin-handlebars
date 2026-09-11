@@ -1,6 +1,6 @@
 # Printer rewrite plan
 
-Status: in progress (phases 0-6.1 done). Branch: `feat/printer-v2`, cut from the tip of `master`.
+Status: in progress (phases 0-6.2 done). Branch: `feat/printer-v2`, cut from the tip of `master`.
 `feat/style-options` stays as the record of what not to do.
 
 ## 1. What went wrong, precisely
@@ -279,11 +279,44 @@ come up quickly.
 | 4 | Printer: program, text, mustache, comment. Throws on anything else. | new suite, written against the new shape | coverage report shows N/M formattable; those N pass all five properties; **first corpus diff read by eye** |
 | 5 | Printer: elements and attributes. | extends phase 4 suite | N grows; single tag group verified against the `perk.hbs` shape; diff read |
 | 6 | Printer: blocks, partials, decorators, else-chains, raw blocks. | syntax-coverage table | every corpus file formattable; full syntax table green; diff read |
+| 6.1 | Simplification pass over `printer.ts`, `expression.ts`, `call-shape.ts`. | unchanged | output byte-identical over the corpus; printer 506 → 441 lines |
+| 6.2 | **Refuse malformed input.** Every construct that opens must close; the parser throws with a location instead of recovering silently. | `test/syntax-errors.test.ts`; both fuzz gates become two-sided | corpus still byte-identical; every reject category covered |
 | 7 | Differential against `prettier-hbs` on the corpus. | — | every divergence listed and justified as deliberate |
 | 8 | Corpus migration, chunked by directory. | — | each chunk reviewed by eye before the next |
 
 Phases 2 and 3 are load-bearing. If the tiling property holds, most of the printer's
 difficulty evaporates.
+
+### 8.1 Why phase 6.2 exists
+
+It should have been a goal from the start. `prettier-hbs`, for all its hacks, crashes loudly on
+unbalanced markup, and that crash was doing real work as a poor man's validator. This plugin
+recovered instead, in three flavours, all silent:
+
+| shape | what it did | example |
+|---|---|---|
+| local recovery | opener became a raw node; the rest of the file still parsed | `<div>` never closed |
+| swallow to EOF | everything from the opener became one verbatim node — indistinguishable from "the plugin chose not to touch this file" | a missing `"` in one attribute; a typo'd `prettier-ignore-end` |
+| silent completion | **the formatter wrote the closing delimiter the author did not** | `{{foo` → `{{foo}}` |
+
+The third breaks §3 outright: it changes what renders. It was invisible because the property
+gates only run over well-formed corpus files.
+
+The rule is now one rule, with no exceptions to keep in step with the HTML spec: **everything
+that opens must close.** That includes the spec's optional end tags — `<li>`, `<td>`, `<p>` —
+because a list of exemptions is a maintenance surface, and the corpus already closes them
+(no corpus file relied on an implicit close).
+
+Escape hatches, both already in use and both preserved:
+
+- `{{{concat '<div class="row">'}}}` for genuinely conditional markup, e.g.
+  `shared/cost_centers_fields.hbs`
+- `{{! prettier-ignore }}` / `{{! prettier-ignore-start }}` … `{{! prettier-ignore-end }}` for a
+  region to be left alone; nothing inside is parsed, so nothing inside can be rejected
+
+`UnmatchedNode` keeps only its four honest verbatim jobs: closed raw blocks, closed ignore
+regions, dynamic elements, unsupported mustache kinds. `shouldPreserveUnclosedBlockRemainder`
+existed only to choose between the first two shapes above and is gone.
 
 ## 9. Risks
 
@@ -294,5 +327,8 @@ difficulty evaporates.
   own fuzz coverage from the phase it lands in.
 - **`fill` semantics for CJK / long words** — inherited from prettier's `getTextValueParts`; copy
   their approach rather than inventing one.
+- **Markup split across partials** — `{{> header}}` opens a `<div>`, `{{> footer}}` closes it —
+  is a hard failure under phase 6.2 and cannot be fixed by closing a tag. Not present in the
+  corpus. `prettier-ignore` is the escape hatch if it ever comes up.
 - **Taste regressions are invisible to the gates.** The only defence is §7's sixth gate. If a
   phase ends without someone having read its corpus diff, that phase is not done.

@@ -4,6 +4,8 @@
 export const DEFAULT_SEED = 20260429;
 export const DEFAULT_CASE_COUNT = 400;
 
+/* Legal templates, composed into the generated cases. The positive properties - source is
+ * never lost, formatting is idempotent - only mean something over input the parser accepts. */
 const atoms = [
   'Hello, {{name}}!',
   '{{ value }}',
@@ -16,7 +18,6 @@ const atoms = [
   '{{*log value level="debug"}}',
   '{{~*log value~}}',
   '{{#> layout title=title}}<main>{{body}}</main>{{/layout}}',
-  '{{#> layout}}\n  <main>{{body}}</main>',
   '{{#*decorate value=true}}<span>{{label}}</span>{{/decorate}}',
   '{{#*inline "badge"}}<span>{{label}}</span>{{/inline}}',
   '{{!-- <span>{{ price }}</span> --}}',
@@ -25,17 +26,38 @@ const atoms = [
   '<div class="box {{#if active}}box--active{{/if}} {{ extra }}"></div>',
   '<div data-json=\'{"html":"<b>","value":"{{raw}}"}\'></div>',
   '<input disabled type=text>',
-  '<br></br>',
+  '<br><hr>',
   '<x-thing />',
   '<p>1 < 2 and {{ value }}</p>',
   '<script>const tpl = "</script><div>{{value}}</div>";</script>',
   '<script>const state={count:1};function read(){return state.count}</script>',
   '<style>.banner{color:red;background:#fff}</style>',
   '{{{{raw}}}}<div>{{ notParsed }}</div>{{{{/raw}}}}',
-  '{{{{raw}}}}<div>{{ notParsed }}</div>',
   '{{! prettier-ignore }}\n<div    class="raw">{{value}}</div>',
   '{{!-- prettier-ignore-start --}}\n<div    class="raw">{{value}}</div>\n{{!-- prettier-ignore-end --}}',
   '<{{#if link}}a href="{{href}}"{{else}}div{{/if}} class="box">{{label}}</{{#if link}}a{{else}}div{{/if}}>',
+];
+
+/* The other half of the contract: input the parser must refuse, with a location. Kept separate
+ * from the atoms so a malformed fragment cannot quietly poison a generated case. */
+export const malformed = [
+  '<div>\n  <span>x</span>\n',
+  '<div>x</div>\n</div>',
+  '<div><span>x</div></span>',
+  '<div class="foo>x</div>',
+  '<br></br>',
+  '<ul><li>a<li>b</ul>',
+  '{{#if a}}\n  x\n',
+  '{{#if a}}x{{/unless}}',
+  '{{#if a}}x{{/if}}{{/unless}}',
+  '{{#if a}}{{#unless b}}x{{/if}}{{/unless}}',
+  '{{#> layout}}\n  <main>{{body}}</main>',
+  '{{#*inline "badge"}}<span>{{label}}</span>',
+  '{{{{raw}}}}<div>{{ notParsed }}</div>',
+  '{{! prettier-ignore-start }}\n<div class="raw">{{value}}</div>',
+  '<!-- unterminated',
+  '{{foo',
+  '{{!-- x',
 ];
 
 const wrappers = [
