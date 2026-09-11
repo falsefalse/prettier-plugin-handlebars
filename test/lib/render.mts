@@ -19,7 +19,7 @@ export type RenderDifference =
   | { kind: 'unrenderable' }
   | { kind: 'render' | 'whitespace'; branch: string; before: string; after: string };
 
-/* Deliberately not imported from `src/whitespace.ts`. This file is the oracle the parser is
+/* Deliberately not imported from `src/core/whitespace.ts`. This file is the oracle the parser is
  * checked against, so it states HTML's rule independently: sharing the constant would let a
  * wrong one be wrong on both sides, and the gate would agree with the bug. Written once here. */
 const HTML_WHITESPACE = /[ \t\r\n\f]/u;

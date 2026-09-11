@@ -3,7 +3,7 @@
  * quietly formatted into something the author did not write. */
 import prettier from 'prettier';
 import * as plugin from '../dist/plugin.js';
-import { TemplateSyntaxError } from '../dist/errors.js';
+import { TemplateSyntaxError } from '../dist/core/errors.js';
 import { renderDifference } from '../test/lib/render.mts';
 import { fuzzCasesFromEnv, malformed } from './lib/fuzz-cases.mjs';
 

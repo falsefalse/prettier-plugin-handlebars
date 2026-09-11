@@ -1,9 +1,35 @@
-import { isTemplateExpressionQuoteStart } from 'template-format-core';
-import { scanPastQuotes } from '../../scan';
-import * as whitespace from '../../whitespace';
-import type { TemplateBlockPrefix, TemplateToken } from 'template-format-core';
+import { scanPastQuotes } from '../../core/scan';
+import * as whitespace from '../../core/whitespace';
 
-export interface HandlebarsToken extends TemplateToken {
+export type TokenKind = 'blockStart' | 'blockEnd' | 'partial' | 'comment' | 'mustache' | 'else';
+
+/** How a block opens, which is also how its closer and its `{{else}}` are spelled. */
+export type BlockPrefix = '#' | '#>' | '#*' | '^' | '<' | '$';
+
+/** A form the printer reproduces but the parser treats as its plain counterpart. */
+export type SpecialForm =
+  | 'blockPartial'
+  | 'decoratorBlock'
+  | 'decorator'
+  | 'elseIf'
+  | 'inverseBlock'
+  | 'parent'
+  | 'mustacheBlock';
+
+export interface HandlebarsToken {
+  kind: TokenKind;
+  /** The inner text, whitespace control and the leading sigil stripped. */
+  content: string;
+  /** The inner text exactly as written, delimiters aside. */
+  rawContent: string;
+  start: number;
+  end: number;
+  triple: boolean;
+  /** The path a block opens or closes on. Absent on everything that opens nothing. */
+  name?: string;
+  trimOpen: boolean;
+  trimClose: boolean;
+  specialForm?: SpecialForm;
   /**
    * Whether the tokenizer found a closing delimiter, rather than running to the end of the
    * input. Recorded by the one place that knows: re-deriving it by string-matching the token's
@@ -13,9 +39,9 @@ export interface HandlebarsToken extends TemplateToken {
   terminated: boolean;
 }
 
-/* Deliberately not typed `: TemplateDialect`. That interface demands nine more members than the
- * parser and printer ever ask for, each a second copy of Handlebars syntax to keep in step by
- * hand - `getLineCommentTag` and `printComment` disagree about the same thing. */
+/* Deliberately untyped. An interface here would fix a member for every piece of Handlebars
+ * syntax, each a second copy to keep in step with the printer by hand; the inferred shape is
+ * exactly what the parser and printer ask for. */
 export const handlebarsDialect = {
   openDelimiter: '{{',
   parseToken: parseHandlebarsToken,
@@ -88,7 +114,6 @@ function parseHandlebarsToken(text: string, position: number): HandlebarsToken {
 
   const baseToken = {
     rawContent,
-    rawInner,
     start: position,
     end,
     triple,
@@ -190,10 +215,22 @@ function findHandlebarsBlockCommentClose(
   return plain < 0 ? null : { index: plain, end: plain + close.length + 2, trimClose: false };
 }
 
+/* A quote opens a string only where a value can start. Mid-token - `it's` in `{{t it's}}` -
+ * it is an apostrophe, and treating it as an opening quote runs the scan past the real `}}`. */
+function opensQuote(text: string, index: number, expressionStart: number): boolean {
+  if (index <= expressionStart) {
+    return true;
+  }
+
+  const previous = text[index - 1];
+
+  return !previous || whitespace.handlebars.test(previous) || /[([{=,:~|]/u.test(previous);
+}
+
 function findHandlebarsClose(text: string, position: number, closeDelimiter: string): number {
   return scanPastQuotes(text, position, {
     stopsAt: (index) => text.startsWith(closeDelimiter, index),
-    opensQuote: (index) => isTemplateExpressionQuoteStart(text, index, position),
+    opensQuote: (index) => opensQuote(text, index, position),
   });
 }
 
@@ -278,7 +315,7 @@ function consumeHandlebarsRawBlock(text: string, position: number): number | nul
   return closeIdx + closer.length;
 }
 
-function getHandlebarsBlockExpression(token: TemplateToken): string {
+function getHandlebarsBlockExpression(token: HandlebarsToken): string {
   if (token.specialForm === 'blockPartial' || token.specialForm === 'decoratorBlock') {
     return token.content.slice(2).trim();
   }
@@ -286,7 +323,7 @@ function getHandlebarsBlockExpression(token: TemplateToken): string {
   return token.content.slice(1).trim();
 }
 
-function getHandlebarsBlockPrefix(token: TemplateToken): TemplateBlockPrefix {
+function getHandlebarsBlockPrefix(token: HandlebarsToken): BlockPrefix {
   if (token.specialForm === 'blockPartial') {
     return '#>';
   }
@@ -310,7 +347,7 @@ function getHandlebarsBlockPrefix(token: TemplateToken): TemplateBlockPrefix {
   return '#';
 }
 
-function getPrintedHandlebarsBlockPrefix(prefix: TemplateBlockPrefix): string {
+function getPrintedHandlebarsBlockPrefix(prefix: BlockPrefix): string {
   if (prefix === '#>' || prefix === '<') {
     return `${prefix} `;
   }
@@ -326,7 +363,7 @@ function getHandlebarsBlockClosePrefix(path: string): string {
   return `/${path}`;
 }
 
-function shouldPreserveHandlebarsTokenVerbatim(token: TemplateToken): boolean {
+function shouldPreserveHandlebarsTokenVerbatim(token: HandlebarsToken): boolean {
   return token.specialForm === 'elseIf';
 }
 

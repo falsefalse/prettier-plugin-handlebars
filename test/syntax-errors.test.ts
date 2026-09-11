@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import prettier from 'prettier';
 import { parse } from '../src/parser';
-import { TemplateSyntaxError } from '../src/errors';
+import { TemplateSyntaxError } from '../src/core/errors';
 import * as plugin from '../src/plugin';
 
 function failure(source: string): TemplateSyntaxError {

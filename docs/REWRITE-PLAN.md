@@ -107,7 +107,12 @@ delivers the stated goals directly:
 
 Keep `src/parser.ts`'s scaffolding: recursive descent, error recovery, `UnmatchedNode`,
 `prettier-ignore`, raw blocks (`{{{{raw}}}}`), dynamic tags, void/raw-text element tables from
-`template-format-core`. Two changes.
+`src/core/html.ts`. Two changes.
+
+`src/core/` holds what knows nothing about Handlebars, Prettier, or each other - source ranges,
+HTML tag tables, whitespace classes, quote-aware scanning, the syntax error. Every file there
+imports nothing at all, which is what makes it a layer and not a folder. Vendored from
+`template-format-core` so the package ships no runtime dependency.
 
 ### 4.1 Whitespace fidelity (the critical one)
 

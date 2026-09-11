@@ -3,7 +3,7 @@
  * parser accepts, so the malformed corpus must be refused, with a location. */
 import { parse } from '../dist/parser.js';
 import { findExpressionViolations, findTilingViolations } from '../test/lib/ast-invariants.mts';
-import { TemplateSyntaxError } from '../dist/errors.js';
+import { TemplateSyntaxError } from '../dist/core/errors.js';
 import { fuzzCasesFromEnv, malformed } from './lib/fuzz-cases.mjs';
 
 const { cases, seed } = fuzzCasesFromEnv();

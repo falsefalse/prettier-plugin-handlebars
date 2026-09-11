@@ -13,21 +13,19 @@ import {
   ParseEndReason,
   UnmatchedNode,
 } from './types';
-import { voidElements, rawTextElements } from 'template-format-core';
-import { locEnd, locStart, normalizeInput, withOptionalRange, withRange } from 'template-format-core';
+import { voidElements, rawTextElements } from './core/html';
+import { normalizeInput, withOptionalRange, withRange } from './core/source';
+import { scanPastQuotes } from './core/scan';
+import { TemplateSyntaxError } from './core/errors';
+import * as whitespace from './core/whitespace';
 import { parseCall } from './expression';
-import { scanPastQuotes } from './scan';
-import { TemplateSyntaxError } from './errors';
 import type { HandlebarsToken as MustacheToken } from './dialects/handlebars/tokens';
-import * as whitespace from './whitespace';
 import {
   handlebarsDialect,
   handlebarsRawBlockCloser,
   handlebarsRawBlockName,
   isHandlebarsBlockComment,
 } from './dialects/handlebars/tokens';
-
-export { locEnd, locStart };
 
 /* Built from the shared class so the character list stays written in one place. */
 const leadingWhitespace = new RegExp(`^${whitespace.htmlRun.source}`, 'u');

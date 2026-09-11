@@ -1,8 +1,8 @@
 import type { AstPath, Doc, ParserOptions, Printer } from 'prettier';
 import { builders, utils } from 'prettier/doc';
-import { stripCommonIndent, voidElements } from 'template-format-core';
+import { voidElements } from './core/html';
 import { handlebarsDialect as templateDialect } from './dialects/handlebars/tokens';
-import * as whitespace from './whitespace';
+import * as whitespace from './core/whitespace';
 import type {
   AttributeValue,
   BlockStatement,
@@ -283,7 +283,7 @@ function printComment(node: CommentStatement): Doc {
    * the surrounding structure instead of staying frozen at the column it was written at.
    * Common indentation is stripped and re-applied, which keeps the body's *relative* shape. */
   if (/^\n/u.test(body)) {
-    const lines = stripCommonIndent(body.replace(/^\n/u, '').replace(trailingWhitespace, '').split('\n'));
+    const lines = whitespace.stripCommonIndent(body.replace(/^\n/u, '').replace(trailingWhitespace, '').split('\n'));
 
     return lines.every((line) => line === '')
       ? [open, hardline, close]

@@ -1,6 +1,6 @@
-import { withRange } from 'template-format-core';
-import { TemplateSyntaxError } from './errors';
-import * as whitespace from './whitespace';
+import { withRange } from './core/source';
+import { TemplateSyntaxError } from './core/errors';
+import * as whitespace from './core/whitespace';
 import type { Call, Expression, HashPair, Literal, LiteralType, PathExpression, SubExpression } from './types';
 
 const quoteCharacters = new Set(['"', "'", '`']);

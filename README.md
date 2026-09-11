@@ -2,9 +2,9 @@
 
 A Prettier plugin for classic Handlebars templates with mixed HTML markup.
 
-This started as a fork of another plugin — see [Prior work](#prior-work). It is **opinionated**:
-it exposes no options of its own, only Prettier's core `printWidth`, `tabWidth`, `useTabs` and
-`singleQuote`. Everything else is a decision the formatter has already made.
+It is **opinionated**: it exposes no options of its own, only Prettier's core `printWidth`,
+`tabWidth`, `useTabs` and `singleQuote`. Everything else is a decision the formatter has already
+made.
 
 ## The rule everything follows
 
@@ -132,15 +132,6 @@ correctness; they cannot see bad taste, which is the failure mode that actually 
 
 [docs/REWRITE-PLAN.md](./docs/REWRITE-PLAN.md) is the design record — why the printer looks like
 this, and what the previous one got wrong.
-
-## Prior work
-
-This plugin began as a fork of
-[Poliklot/prettier-plugin-handlebars](https://github.com/Poliklot/prettier-plugin-handlebars),
-published as `@poliklot/prettier-plugin-handlebars` and MIT-licensed, © Poliklot. The parser and
-printer have since been rewritten — [docs/REWRITE-PLAN.md](./docs/REWRITE-PLAN.md) is that record
-— and the package now ships under its own name, but the shape of the project, a Handlebars-aware
-`.hbs` formatter with no options of its own, starts there.
 
 ## Docs
 
