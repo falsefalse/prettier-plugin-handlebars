@@ -172,7 +172,7 @@ export function isTagStart(text: string, position: number): boolean {
  * `scanTag` reads values with this too, so its idea of where a tag ends matches the parser's;
  * were they to disagree, a `{{! prettier-ignore }}` region could stop mid-tag.
  */
-export function readUnquotedValueEnd(text: string, position: number): number {
+function readUnquotedValueEnd(text: string, position: number): number {
   let pos = position;
 
   while (pos < text.length && text[pos] !== '>' && !whitespace.html.test(text[pos])) {
@@ -205,7 +205,7 @@ export function readAttributeValue(text: string, position: number): { raw: strin
   return { raw: text.slice(position, end), start: position, end };
 }
 
-export function readQuotedAttributeValue(
+function readQuotedAttributeValue(
   text: string,
   position: number,
   quote: string,

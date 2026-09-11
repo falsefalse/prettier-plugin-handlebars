@@ -1,5 +1,6 @@
 import {
   AttributeValue,
+  AttributeBlockNode,
   AttributeValuePart,
   Program,
   Node,
@@ -527,6 +528,30 @@ function parseBlock(
   return { node, next: finalPos, closed: Boolean(closeToken) };
 }
 
+/**
+ * The node a mustache stands for and where it ends, or null when it stands for nothing on its
+ * own: a block that never closes, a stray `{{else}}` or `{{/if}}`. Recovering from that is the
+ * caller's, and the two callers disagree - in attribute position it stays a mustache, inside a
+ * value it goes back to being text.
+ */
+function readTemplateNode(
+  text: string,
+  token: MustacheToken,
+  position: number,
+  rangeOffset: number,
+): { node: AttributeBlockNode; next: number } | null {
+  const statement = createStatement(text, token, position, rangeOffset);
+  if (statement) {
+    return { node: statement, next: token.end };
+  }
+
+  if (token.kind === 'blockStart' && hasMatchingBlockEnd(text, token)) {
+    return parseBlock(text, token, rangeOffset);
+  }
+
+  return null;
+}
+
 function parseTag(text: string, position: number, rangeOffset: number): ParsedTag {
   let pos = position + 1; // skip '<'
 
@@ -587,26 +612,16 @@ function parseTag(text: string, position: number, rangeOffset: number): ParsedTa
     if (startsTemplateTag(text, pos)) {
       const token = parseMustacheToken(text, pos);
 
-      const statement = createStatement(text, token, pos, rangeOffset);
-      if (statement) {
-        add({ type: 'AttributeBlock', block: statement }, token.end);
-        pos = token.end;
-        continue;
-      }
+      /* Unbalanced is not itself grounds to reject here - the tag's own extent is already fixed
+       * - so it stays a mustache. `createMustache` still parses the call, so what is *inside*
+       * one can be rejected the same as anywhere else. */
+      const read = readTemplateNode(text, token, pos, rangeOffset) ?? {
+        node: createMustache(text, token, pos, rangeOffset),
+        next: token.end,
+      };
 
-      if (token.kind === 'blockStart' && hasMatchingBlockEnd(text, token)) {
-        const { node, next } = parseBlock(text, token, rangeOffset);
-        add({ type: 'AttributeBlock', block: node }, next);
-        pos = next;
-        continue;
-      }
-
-      /* A block that never closes, or a stray `{{else}}` / `{{/if}}`. Being unbalanced is not
-       * itself grounds to reject here - the tag's own extent is already fixed - so they are kept
-       * as a mustache. `createMustache` still parses the call, so what is *inside* one can be
-       * rejected the same as anywhere else. */
-      add({ type: 'AttributeBlock', block: createMustache(text, token, pos, rangeOffset) }, token.end);
-      pos = token.end;
+      add({ type: 'AttributeBlock', block: read.node }, read.next);
+      pos = read.next;
       continue;
     }
 
@@ -808,26 +823,12 @@ function parseAttributeValueParts(value: string, rangeOffset: number): Attribute
     if (startsTemplateTag(value, pos)) {
       const token = parseMustacheToken(value, pos);
 
-      const statement = createStatement(value, token, pos, rangeOffset);
-      if (statement) {
-        parts.push(statement);
-        pos = token.end;
-        continue;
-      }
-
-      if (token.kind === 'blockStart' && hasMatchingBlockEnd(value, token)) {
-        const { node, next } = parseBlock(value, token, rangeOffset);
-        parts.push(node);
-        pos = next;
-        continue;
-      }
-
       /* A value is a string, so the recovery here keeps the source as text rather than as a
        * node - unlike attribute position, where an unreadable token stays a mustache. */
-      parts.push(
-        textNode(value, pos, token.end, rangeOffset),
-      );
-      pos = token.end;
+      const read = readTemplateNode(value, token, pos, rangeOffset);
+
+      parts.push(read?.node ?? textNode(value, pos, token.end, rangeOffset));
+      pos = read?.next ?? token.end;
       continue;
     }
 
