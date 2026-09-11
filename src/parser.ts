@@ -15,9 +15,27 @@ import {
 } from './types';
 import { voidElements, rawTextElements } from './core/html';
 import { normalizeInput, withOptionalRange, withRange } from './core/source';
-import { scanPastQuotes } from './core/scan';
-import { TemplateSyntaxError } from './core/errors';
+import { fail, TemplateSyntaxError } from './core/errors';
 import * as whitespace from './core/whitespace';
+import {
+  attributeNameCharacter,
+  consumeTagLikeChunk,
+  isTagStart,
+  leadingWhitespace,
+  readAttributeName,
+  readCloseTagSource,
+  readName,
+  readQuotedAttributeValue,
+  readUnquotedValueEnd,
+  sameTag,
+  scanTag,
+  skipWhitespace,
+  startsCloseTag,
+  startsTemplateTag,
+  tagNameTerminator,
+  trimTrailingWhitespace,
+} from './parse/lex';
+import type { ParsedTag } from './parse/lex';
 import { parseCall } from './expression';
 import type { HandlebarsToken as MustacheToken } from './dialects/handlebars/tokens';
 import {
@@ -26,19 +44,6 @@ import {
   handlebarsRawBlockName,
   isHandlebarsBlockComment,
 } from './dialects/handlebars/tokens';
-
-/* Built from the shared class so the character list stays written in one place. */
-const leadingWhitespace = new RegExp(`^${whitespace.htmlRun.source}`, 'u');
-
-/* HTML's lexical classes, composed from the whitespace list rather than repeating it - both
- * embed it, and a second hand-written copy is what `whitespace.ts` exists to prevent. They
- * live here because the tokenizer below is the only thing that reads them. */
-
-/** What an attribute name is made of: anything but whitespace and the characters that end one. */
-const attributeNameCharacter = new RegExp(`[^${whitespace.htmlCharacters}"'<>/=]`, 'u');
-
-/** What ends a tag name. HTML's tag-name state leaves on whitespace, `/` or `>`, and nothing else. */
-const tagNameTerminator = new RegExp(`[${whitespace.htmlCharacters}/>]`, 'u');
 
 interface ParseResult {
   nodes: Node[];
@@ -55,7 +60,6 @@ interface ParseResult {
  * only job was to give the dialect member a local name. */
 const {
   openDelimiter,
-  isEscapedOpen,
   parseToken: parseMustacheToken,
   findNextOpen: findNextHandlebarsOpen,
   isDynamicElementStart: isDynamicTagStart,
@@ -75,16 +79,6 @@ export function parse(text: string): Program {
     /* Offsets become line and column here, where the whole text is still in hand. */
     throw error instanceof TemplateSyntaxError ? error.locate(normalizedText) : error;
   }
-}
-
-/**
- * Every malformed construct ends here. A formatter that guesses at a missing delimiter prints
- * markup the author did not write; one that passes a mismatched tag through leaves the rest of
- * the file unformatted with nothing to show for it. Refusing is the only honest option, and the
- * offsets let an editor put the cursor on the offending place.
- */
-function fail(message: string, start: number, end: number): never {
-  throw new TemplateSyntaxError(message, start, end);
 }
 
 /* The dialect reports an unterminated token as one that ends at EOF, which is also what a token
@@ -109,10 +103,6 @@ function consumeTerminatedRawBlock(text: string, position: number, rangeOffset: 
   }
 
   return end;
-}
-
-function startsTemplateTag(text: string, position: number): boolean {
-  return text.startsWith(openDelimiter, position) && !isEscapedOpen(text, position);
 }
 
 function parseChildren(
@@ -705,89 +695,6 @@ function createUnmatchedNode(text: string, start: number, end: number, rangeOffs
   );
 }
 
-/**
- * Where a tag ends, what it is called and whether it closed - without building a single node and
- * without rejecting anything.
- *
- * Lookahead has to be total: callers scan regions they may go on to skip, including a
- * `{{! prettier-ignore }}` body, so a `parseTag` here let the directive reject the very file it
- * was written to protect. `terminated` is false when the tag ran to EOF, which is also how an
- * unterminated attribute value shows up.
- */
-function scanTag(
-  text: string,
-  position: number,
-): { kind: 'open' | 'selfClosing' | 'close'; tag: string; end: number; terminated: boolean } {
-  let pos = position + 1;
-  const closing = text[pos] === '/';
-  if (closing) {
-    pos += 1;
-  }
-
-  const { value: tag, next } = readName(text, pos);
-  pos = next;
-
-  const kindAt = (selfClosed: boolean): ParsedTag['kind'] => {
-    if (closing) {
-      return 'close';
-    }
-
-    return selfClosed || voidElements.has(tag.toLowerCase()) ? 'selfClosing' : 'open';
-  };
-
-  /* A quote only delimits a value directly after `=`, whitespace aside. Treating every quote as
-   * a delimiter would make `title=a"b'c>` swallow the rest of the file hunting a closing `"`. */
-  let afterEquals = false;
-
-  while (pos < text.length) {
-    if (startsTemplateTag(text, pos)) {
-      const token = parseMustacheToken(text, pos);
-      pos = token.end > pos ? token.end : pos + 2;
-      continue;
-    }
-
-    const char = text[pos];
-
-    if (whitespace.html.test(char)) {
-      pos += 1;
-      continue;
-    }
-
-    if (char === '=') {
-      afterEquals = true;
-      pos += 1;
-      continue;
-    }
-
-    if (afterEquals && char !== '>') {
-      pos =
-        char === '"' || char === "'"
-          ? readQuotedAttributeValue(text, pos + 1, char).position
-          : readUnquotedValueEnd(text, pos);
-      afterEquals = false;
-      continue;
-    }
-
-    if (isSelfClosingSlash(text, pos)) {
-      return { kind: kindAt(true), tag, end: pos + 2, terminated: true };
-    }
-
-    if (char === '>') {
-      return { kind: kindAt(false), tag, end: pos + 1, terminated: true };
-    }
-
-    afterEquals = false;
-    pos += 1;
-  }
-
-  return { kind: kindAt(false), tag, end: pos, terminated: false };
-}
-
-type ParsedTag =
-  | { kind: 'open'; tag: string; attributes: ElementAttribute[]; attributesRange: [number, number]; end: number; terminated: boolean }
-  | { kind: 'selfClosing'; tag: string; attributes: ElementAttribute[]; attributesRange: [number, number]; end: number; terminated: boolean }
-  | { kind: 'close'; tag: string; source: string; end: number; terminated: boolean };
-
 function parseTag(text: string, position: number, rangeOffset = 0): ParsedTag {
   let pos = position + 1; // skip '<'
 
@@ -912,82 +819,6 @@ function consumeInvalidVoidElementClose(text: string, position: number, tag: str
   return sameTag(value, tag) && text[end] === '>' ? end + 1 : null;
 }
 
-/* HTML tag names are case-insensitive, so `<DIV>x</div>` is one element. Comparing them
- * verbatim rejected it as unclosed, while the `voidElements` and `rawTextElements` lookups two
- * lines away had been lowercasing all along. */
-function sameTag(one: string, other: string): boolean {
-  return one.toLowerCase() === other.toLowerCase();
-}
-
-/**
- * Whether a close tag for exactly `tag` starts here.
- *
- * The name has to end where `tag` does. On a prefix comparison `</bdi>` would close a `<b>`,
- * deleting `di` from the source and pointing any error at the next, well-formed close tag.
- */
-function startsCloseTag(text: string, position: number, tag: string): boolean {
-  if (!text.startsWith('</', position)) {
-    return false;
-  }
-
-  const { value: name, next } = readName(text, position + 2);
-
-  return sameTag(name, tag) && (next >= text.length || tagNameTerminator.test(text[next]));
-}
-
-/* Everything between `</` and `>`. HTML keeps only the name and throws the rest away, but it is
- * still the author's source: `</h{{level}}>` has to come back out spelled that way. Whitespace
- * runs collapse so a close tag can never put a raw newline into a doc. */
-function readCloseTagSource(text: string, position: number, closeIdx: number): string {
-  return text
-    .slice(position + 2, closeIdx >= 0 ? closeIdx : text.length)
-    .trim()
-    .replace(whitespace.htmlRunGlobal, ' ');
-}
-
-/* One past the last non-whitespace character, leaving the author's trailing whitespace to the
- * caller instead of burying it inside a node that prints verbatim. */
-function trimTrailingWhitespace(text: string, from: number): number {
-  let end = text.length;
-
-  while (end > from && whitespace.html.test(text[end - 1])) {
-    end -= 1;
-  }
-
-  return end;
-}
-
-function isTagStart(text: string, position: number): boolean {
-  if (text[position] !== '<') {
-    return false;
-  }
-
-  return /[A-Za-z!/]/u.test(text[position + 1] ?? '');
-}
-
-/**
- * Where an unquoted attribute value ends. HTML's unquoted-value state ends at whitespace or `>`
- * and nowhere else, so a `/` is content: breaking on it would drop the trailing slash of
- * `src=/a/b/` and make `<a href=/path/>t</a>` a self-closing `<a>` that rejects its own `</a>`.
- * `scanTag` reads values with this too, so its idea of where a tag ends matches the parser's;
- * were they to disagree, a `{{! prettier-ignore }}` region could stop mid-tag.
- */
-function readUnquotedValueEnd(text: string, position: number): number {
-  let pos = position;
-
-  while (pos < text.length && text[pos] !== '>' && !whitespace.html.test(text[pos])) {
-    if (startsTemplateTag(text, pos)) {
-      const token = parseMustacheToken(text, pos);
-      pos = token.end > pos ? token.end : pos + 2;
-      continue;
-    }
-
-    pos += 1;
-  }
-
-  return pos;
-}
-
 function parseAttribute(
   text: string,
   position: number,
@@ -1036,10 +867,8 @@ function parseAttribute(
     fail('attribute value cannot contain both quote characters', rangeOffset + valueStart, rangeOffset + pos);
   }
 
-
   return { attribute: createAttribute(name, rawValue, rangeOffset + valueStart), position: pos };
 }
-
 
 function parseDynamicAttribute(
   text: string,
@@ -1250,73 +1079,6 @@ function preserveValueWhitespace(nodes: Node[]): void {
   }
 }
 
-function readQuotedAttributeValue(
-  text: string,
-  position: number,
-  quote: string,
-): { value: string; position: number } {
-  let pos = position;
-
-  while (pos < text.length) {
-    if (startsTemplateTag(text, pos)) {
-      const token = parseMustacheToken(text, pos);
-      pos = token.end > pos ? token.end : pos + 2;
-      continue;
-    }
-
-    if (text[pos] === quote) {
-      return { value: text.slice(position, pos), position: pos + 1 };
-    }
-
-    pos += 1;
-  }
-
-  return { value: text.slice(position), position: text.length };
-}
-
-/* One past the whitespace run starting at `position`. Every caller wants an index, and taking
- * one instead of a pair of closures is what let the open-coded copies of this loop go. */
-function skipWhitespace(text: string, position: number): number {
-  let pos = position;
-
-  while (pos < text.length && whitespace.html.test(text[pos])) {
-    pos += 1;
-  }
-
-  return pos;
-}
-
-/**
- * HTML's attribute-name state ends at whitespace, `/`, `>` or `=`, and nowhere else.
- *
- * Matching a tag-name charset instead stepped over one character and carried on: `@click` came
- * back as `click` and `(click)="go()"` as two boolean attributes, value gone, silently.
- */
-/* Stops at a mustache as well as at the characters HTML ends a name on. `parseDynamicAttribute`
- * has already had its go by the time this runs, so what is left is a block or a partial glued to
- * the name - `<div data-{{#if a}}x{{/if}}>`. Reading `data-{{#if` as the name desynchronised the
- * tag loop, which then reported the `/` of `{{/if}}` as an unexpected character. Left here, the
- * tag loop takes the block as its own glued attribute and the two print back together. */
-function readAttributeName(text: string, position: number): { value: string; next: number } {
-  let pos = position;
-  while (pos < text.length && attributeNameCharacter.test(text[pos]) && !startsTemplateTag(text, pos)) {
-    pos += 1;
-  }
-  return { value: text.slice(position, pos), next: pos };
-}
-
-function readName(text: string, position: number): { value: string; next: number } {
-  let pos = position;
-  while (pos < text.length && /[A-Za-z0-9_:-]/.test(text[pos])) {
-    pos += 1;
-  }
-  return { value: text.slice(position, pos), next: pos };
-}
-
-function isSelfClosingSlash(text: string, position: number): boolean {
-  return text[position] === '/' && text[position + 1] === '>';
-}
-
 function findNextMarkup(text: string, position: number): number {
   let next = text.length;
   let searchPos = position;
@@ -1485,25 +1247,6 @@ function findRawTextClose(text: string, position: number, tag: string): number {
   }
 
   return -1;
-}
-
-/** Whether the character before `index`, whitespace aside, is `=`. */
-function follows(text: string, index: number, char: string): boolean {
-  let at = index - 1;
-  while (at >= 0 && whitespace.html.test(text[at])) at -= 1;
-
-  return text[at] === char;
-}
-
-function consumeTagLikeChunk(text: string, position: number): number {
-  /* Same rule as a real tag head: a quote delimits a value only after `=`. `<{{t}} a=it's>`
-   * otherwise runs to EOF and swallows the rest of the file into one verbatim node. */
-  const end = scanPastQuotes(text, position + 1, {
-    stopsAt: (index) => text[index] === '>',
-    opensQuote: (index) => follows(text, index, '='),
-  });
-
-  return end === -1 ? text.length : end + 1;
 }
 
 function consumeDynamicElement(text: string, position: number): number | null {

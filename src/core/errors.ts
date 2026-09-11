@@ -41,3 +41,13 @@ export class TemplateSyntaxError extends SyntaxError {
     return this;
   }
 }
+
+/**
+ * Every malformed construct ends here. A formatter that guesses at a missing delimiter prints
+ * markup the author did not write; one that passes a mismatched tag through leaves the rest of
+ * the file unformatted with nothing to show for it. Refusing is the only honest option, and the
+ * offsets let an editor put the cursor on the offending place.
+ */
+export function fail(message: string, start: number, end: number): never {
+  throw new TemplateSyntaxError(message, start, end);
+}
