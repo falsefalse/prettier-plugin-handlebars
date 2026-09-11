@@ -19,9 +19,10 @@ jobs:
       fail-fast: false
       matrix:
         node-version:
-          - 18
-          - 20
-          - 22
+          - "20"
+          - "22"
+          - "24"
+          - "26"
         prettier-version:
           - "3.0"
           - "3.2"
@@ -50,5 +51,11 @@ jobs:
           node --version; npm --version
           node -p -e "require('prettier/package.json').version"
 
-      - name: Check
-        run: npm run check
+      - name: Build and test
+        run: npm run build && npm test
+
+      - name: Typecheck and gates
+        # The gates import `test/lib/*.mts`, which needs node's type stripping:
+        # unflagged from 22.18, so every line here but 20 has it.
+        if: matrix.node-version != '20'
+        run: npm run typecheck && npm run gates

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { parseCall } from '../src/expression';
 import { parse } from '../src/parser';
-import { findExpressionViolations, findTilingViolations } from '../src/ast-invariants';
-import type { Expression, SubExpression } from '../src/types';
+// @ts-expect-error
+import { findExpressionViolations, findTilingViolations } from './lib/ast-invariants.mts';
+import type { Expression, Program, SubExpression } from '../src/types';
 
 const kindsOf = (expressions: Expression[]) => expressions.map((expression) => expression.type);
 const sourcesOf = (expressions: Expression[]) => expressions.map((expression) => expression.source);
@@ -134,8 +135,91 @@ describe('ranges are absolute and contained', () => {
     expect(findExpressionViolations(ast, source)).toEqual([]);
   });
 
+  /* A zero-width node still has to sit at a position its parent owns. The empty inverse was
+   * anchored just past the *first* program, which on an else-if chain is a point inside a
+   * sibling branch - `findTilingViolations` skips empty bodies, so nothing caught it. */
+  it.each([
+    ['{{#if a}}x{{else if b}}y{{/if}}', 24],
+    ['{{#if a}}x{{/if}}', 10],
+    ['{{#if a}}x{{else if b}}{{else if c}}z{{/if}}', 37],
+  ])('puts an empty inverse where the closer starts: %j', (source, at) => {
+    const block = parse(source).body[0];
+    if (block?.type !== 'BlockStatement') throw new Error('expected a block');
+
+    expect(block.inverse.range).toEqual([at, at]);
+    expect(source.startsWith('{{/', at)).toBe(true);
+  });
+
+  /* Ranges are metadata, not content: every node carries one non-enumerably so it stays out of
+   * assertions and out of `JSON.stringify` while the location hooks can still read it.
+   * Attaching one as a plain property instead serialises the same tree two ways depending on
+   * which subtree you are in. */
+  it('keeps a range off the enumerable shape of every node alike', () => {
+    const ast = parse('{{f a b=(g c)}}');
+    const call = ast.body[0];
+    if (call?.type !== 'MustacheStatement') throw new Error('expected a mustache');
+
+    const subExpression = call.hash[0]?.value;
+    const nodes = [call, call.path, call.params[0], call.hash[0], subExpression];
+
+    for (const node of nodes) {
+      expect(node && Object.keys(node)).not.toContain('range');
+      expect(node?.range).toBeDefined();
+    }
+
+    expect(JSON.stringify(ast)).not.toContain('range');
+  });
+
+  /* The attribute list has to account for the whole tag head. While it did not, `parseTag`
+   * could step over a character it failed to read and this gate reported no violation at all. */
+  it('covers the tag head, so a dropped attribute character is a violation', () => {
+    const source = '<div @click="go">x</div>';
+    const ast = parse(source);
+
+    expect(findTilingViolations(ast, source)).toEqual([]);
+
+    const element = ast.body[0];
+    if (element?.type !== 'ElementNode') throw new Error('expected an element');
+    const attribute = element.attributes[0];
+    if (!attribute) throw new Error('expected an attribute');
+
+    /* A narrow name charset yields a `click` attribute starting one past the `@`. */
+    Object.defineProperty(attribute, 'range', { value: [6, 17], configurable: true });
+
+    expect(findTilingViolations(ast, source)).toEqual([
+      { kind: 'uncovered-head', container: '<div> attributes', start: 4, end: 6, text: ' @' },
+    ]);
+  });
+
+  /* Offsets are absolute, not relative to the value substring: relative ones point
+   * `--cursor-offset` and any error raised in there at the wrong part of the file. */
+  it('gives an attribute nested in a value its offset in the template', () => {
+    const source = '<div class="{{#if a}}<span title=\'{{x}}\'>y</span>{{/if}}">z</div>';
+    const ranges: Array<string | undefined> = [];
+
+
+    // literally anything from Program down to strings and numbers, we recurse TODO: narrow it down
+    const collect = (record: any): void => {
+      if (record.type === 'ElementNode' && Array.isArray(record.attributes)) {
+        for (const attribute of record.attributes) {
+          ranges.push(attribute.range && source.slice(attribute.range[0], attribute.range[1]));
+          collect(attribute.block ?? attribute.value);
+        }
+      }
+      for (const value of Object.values(record)) {
+        if (Array.isArray(value)) value.forEach(collect);
+        else if (value && typeof value === 'object') collect(value);
+      }
+    };
+
+    collect(parse(source));
+
+    expect(ranges).toContain('class="{{#if a}}<span title=\'{{x}}\'>y</span>{{/if}}"');
+    expect(ranges).toContain("title='{{x}}'");
+  });
+
   /* A block in attribute position is not part of any tiled span - whitespace between attributes
-   * belongs to the formatter - so it used to be skipped, and its own body went unchecked with it. */
+   * belongs to the formatter - so it is easily skipped, taking its own body with it. */
   it('descends into a block sitting in attribute position', () => {
     const source = '<div {{#if a}}data-x="1"{{/if}}>t</div>';
     const ast = parse(source);

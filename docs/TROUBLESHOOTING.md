@@ -8,7 +8,7 @@ for an extension unless you say so:
 ```js
 /** @type {import("prettier").Config} */
 module.exports = {
-  plugins: ['@poliklot/prettier-plugin-handlebars'],
+  plugins: ['@falsefalse/prettier-plugin-handlebars'],
   overrides: [{ files: ['*.hbs', '*.handlebars'], options: { parser: 'handlebars' } }],
 };
 ```
@@ -25,7 +25,7 @@ In a pnpm or monorepo layout the plugin may not be hoisted where Prettier looks.
 explicit path:
 
 ```js
-plugins: [require.resolve('@poliklot/prettier-plugin-handlebars')];
+plugins: [require.resolve('@falsefalse/prettier-plugin-handlebars')];
 ```
 
 ## Prettier picks the HTML parser instead
@@ -80,6 +80,10 @@ it that way. It will not join lines you separated.
 ## Debug checklist
 
 1. `npx prettier --check "**/*.{hbs,handlebars}"`
-2. `npm ls prettier @poliklot/prettier-plugin-handlebars`
+2. `npm ls prettier @falsefalse/prettier-plugin-handlebars`
 3. `.prettierignore` does not cover the files
 4. The editor uses the workspace Prettier, not a bundled one
+
+If none of that explains it,
+[open an issue](https://github.com/falsefalse/prettier-plugin-handlebars/issues) with the smallest
+template that reproduces the problem and the Prettier version you are on.

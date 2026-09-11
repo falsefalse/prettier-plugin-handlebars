@@ -5,11 +5,13 @@
 import prettier from 'prettier';
 import * as plugin from '../dist/plugin.js';
 import { TemplateSyntaxError } from '../dist/errors.js';
-import { renderDifference } from './render.mjs';
+import { renderDifference } from '../test/lib/render.mts';
 import { fuzzCasesFromEnv, malformed } from './fuzz-cases.mjs';
 
 const { cases, seed } = fuzzCasesFromEnv();
 const failures = [];
+
+let renderCompared = 0;
 
 for (const testCase of cases) {
   try {
@@ -38,6 +40,15 @@ for (const testCase of cases) {
      * between siblings becoming a newline is a layout change a browser cannot see - the corpus
      * gate watches that separately, over files where staying at zero means something. */
     const difference = renderDifference(testCase.source, firstPass);
+
+    /* A case the harness cannot render is a case this gate did not check. Counting it as a pass
+     * is how the render property quietly stopped covering 30% of the corpus. */
+    if (difference?.kind === 'unrenderable') {
+      failures.push({ id: testCase.id, type: 'unrenderable', source: testCase.source });
+    } else {
+      renderCompared += 1;
+    }
+
     if (difference?.kind === 'render') {
       failures.push({
         id: testCase.id,
@@ -103,4 +114,9 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-console.log(`Format fuzz check passed: ${cases.length} formatted, ${malformed.length} refused, seed=${seed}.`);
+/* Say how much was actually render-compared, not just how much was formatted. A gate that
+ * cannot report its own coverage can become vacuous without anyone noticing. */
+console.log(
+  `Format fuzz check passed: ${cases.length} formatted, ${renderCompared} render-compared, ` +
+    `${malformed.length} refused, seed=${seed}.`,
+);

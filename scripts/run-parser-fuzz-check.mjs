@@ -4,7 +4,7 @@
  * Tiling only means something over source the parser accepts, so the malformed corpus gets the
  * other half of the contract: it must be refused, and the refusal must say where. */
 import { parse } from '../dist/parser.js';
-import { findExpressionViolations, findTilingViolations } from '../dist/ast-invariants.js';
+import { findExpressionViolations, findTilingViolations } from '../test/lib/ast-invariants.mts';
 import { TemplateSyntaxError } from '../dist/errors.js';
 import { fuzzCasesFromEnv, malformed } from './fuzz-cases.mjs';
 

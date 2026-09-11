@@ -47,6 +47,18 @@ describe('multi-line blocks keep their shape', () => {
 
     await expectStable(source, `${source}\n`);
   });
+
+  /* A Handlebars path segment may hold spaces inside `[...]`. Splitting the block's name on
+   * whitespace cuts `{{#[my block]}}` down to `[my`, which never matches the `[my block]` its
+   * own closer reports, refusing a block for not closing the one it opened. */
+  it.each([
+    '{{#[my block]}}x{{/[my block]}}',
+    '{{^[my block]}}x{{/[my block]}}',
+    '{{#> [my part]}}x{{/[my part]}}',
+    '{{#[a b].c d}}x{{/[a b].c}}',
+  ])('closes a block whose name holds a space: %j', async (source) => {
+    await expectStable(source, `${source}\n`);
+  });
 });
 
 describe('blocks in attribute position and attribute values', () => {
@@ -91,6 +103,23 @@ describe('blocks in attribute position', () => {
     '<input\n  {{#if a}}\n    type="text"\n    placeholder="HH:MM"\n  {{else}}\n    type="number"\n    min="0"\n  {{/if}}\n>',
   ])('keeps one attribute per line when the author wrote it that way', async (source) => {
     await expectStable(source, `${source}\n`);
+  });
+});
+
+/* Breakability is a property of each section, not of the block as a whole. Read whole-block, a
+ * newline in *one* branch unwraps every other branch with it, spreading `{{#if a}} x {{else}}`
+ * across three lines. That makes `{{#if a}}` standalone and changes the whitespace Handlebars
+ * strips around it - the very thing the one-liner rule exists to prevent. */
+describe('a section the author kept on one line stays on one line', () => {
+  it.each([
+    ['{{#if a}} x {{else}}\ny\n{{/if}}', '{{#if a}} x {{else}}\n  y\n{{/if}}\n'],
+    ['{{#if a}}\nx\n{{else}} y {{/if}}', '{{#if a}}\n  x\n{{else}} y {{/if}}\n'],
+    [
+      '{{#if a}} x {{else if b}}\ny\n{{else}} z {{/if}}',
+      '{{#if a}} x {{else if b}}\n  y\n{{else}} z {{/if}}\n',
+    ],
+  ])('%j', async (source, expected) => {
+    await expectStable(source, expected);
   });
 });
 

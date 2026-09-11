@@ -258,9 +258,11 @@ So eye review is a gate, not a wrap-up step, and the plan is built to serve it:
 - The migration is chunked by directory, not landed as one commit, so the diffs stay
   small enough to actually read.
 
-Typing: `strict` + `noUncheckedIndexedAccess` + `noImplicitOverride`, and a test that greps the
-printer for `as ` and fails above a fixed budget. Only `AstPath` boundary casts are legitimate
-(see the `no-default-type-casts` memory).
+Typing: `strict` + `noImplicitOverride`, and no casts. `src/` has none - the last five were
+`as const` on object literals, three of which the compiler never needed and two of which went
+away by annotating the value instead of pinning its literal. `noUncheckedIndexedAccess` is
+*not* on: it reports 38, almost all of them `text[pos]` in the parser's scanners, where the
+bounds are the loop condition.
 
 ## 8. Phases
 
@@ -397,11 +399,13 @@ own line, where Handlebars' standalone rule strips the whitespace around it; and
 inline block put its markers on their own lines, doing the same. An empty `{{else}}` was dropped
 along with its `~` markers. `textPieces` split on `\s`, which matched U+00A0.
 
-**Known limitation, pinned rather than hidden.** Handlebars strips the newline after a standalone
-partial, which turns the *next* line's indentation into rendered content. Indenting children is
-the formatter's job, so the two collide - but only when the formatter *changes* that indentation,
-which never happens on a file it has already formatted. `render-equivalence.test.ts` records both
-halves.
+**Known limitation, pinned rather than hidden.** Handlebars strips the newline after any
+standalone statement - a partial, a comment, a block's own markers - which turns the *next*
+line's indentation into rendered content. Indenting children is the formatter's job, so the two
+collide - but only when the formatter *changes* that indentation, which never happens on a file
+it has already formatted. `render-equivalence.test.ts` records both halves, and the fuzz
+generator stops short of manufacturing it: `indented` keeps a wrapper's body in step with the
+wrapper, and a piece that starts a line is not padded.
 
 **Dead code.** `consumeUnsupportedBlock` and its two guards were unreachable: `elseIf` is only
 ever set on a `kind: 'else'` token, never a `blockStart`. `normalizeTagAttributes` was vestigial -
@@ -451,6 +455,77 @@ holding a quote, and flagged two valid corpus files: `accept={{mimefor 'x'}}` is
 literal inside a mustache, not a delimiter. Only a value holding *both* quote kinds is
 unprintable - a quoted one would have ended at the first matching delimiter - so only that is
 refused.
+
+### 8.5 What the second review pass found
+
+Fourteen more, again with every gate green. Grouped by what let each one through.
+
+**Source the parser deleted.** `readName`'s `[A-Za-z0-9_:-]` is a *tag*-name charset; HTML's
+attribute-name state ends only at whitespace, `/`, `>` or `=`. Anything else sent `parseTag` down
+a branch that stepped over one character and carried on, so `@click` came back as `click`,
+`(click)="go()"` as two boolean attributes with the value gone, and `data-x.y` as `data-xy` -
+silently, every time. There is now nothing left to skip, so the branch is a `fail()`.
+
+**The gate shaped like the bug.** `childListsOf` tiled element children and attribute *values*,
+never the attribute list, so the parser could drop characters while `run-parser-fuzz-check`
+reported "432 cases tile". Attributes carry a span now and the list has to account for the whole
+tag head, with only whitespace allowed in the gaps - whitespace between attributes is the
+formatter's, the rest is the author's. Restoring the old charset makes it report the dropped text
+verbatim.
+
+**Lookahead that could reject.** `findMatchingTagClose` and `consumeNextNode` both went through
+`parseTag`, which builds nodes and can `fail()`. So a `{{! prettier-ignore }}` region - written
+precisely because its markup is unusual - could be rejected on the way past, contradicting the
+README. `scanTag` replaces it: it finds where the tag head stops and nothing else, and cannot
+fail. Note it also has to know that a quote only delimits a value directly after `=`, or
+`title=a"b'c>` swallows the rest of the file.
+
+**Whitespace control read as text.** `createComment` was handed `token.rawContent`, `~` markers
+and all, and `CommentStatement` had nowhere to put them: `{{~! x ~}}` came back as
+`{{! ~! x ~ }}`, the stripping stopped happening, and `{{~! prettier-ignore ~}}` quietly stopped
+being a directive. The tokenizer also anchored the block form on the literal `{{!--`, so
+`{{~!-- x --~}}` was demoted to a line comment.
+
+**The printer contradicting the parser.** The parser refuses an unquoted value holding both quote
+characters; `chooseQuote` still emitted one, because the value reader skips over mustaches to
+find the closing quote and so accepts `class="{{t 'a' "b"}}"` - which a browser cuts short. The
+check belongs to the value, not to how it was quoted.
+
+**Rejecting what a browser accepts.** A `/` in an unquoted value is content, not `/>`, so
+`<a href=/path/>t</a>` was a self-closing `<a>` that then rejected its own `</a>`. Tag names
+ignore case, though `voidElements` and `rawTextElements` had been lowercasing all along. And raw
+text ends at `</tag` only when the name ends there, so `"</scriptx>"` inside a script body is not
+a close tag. The close tag keeps the author's spelling, so accepting a case mismatch does not
+quietly rewrite it.
+
+**A primary gate that cried wolf.** `htmlEquivalent` normalised unquoted values but not the quote
+*character*, and knew nothing of `<br />` vs `<br>` - both of which the printer changes on sight.
+The corpus read zero only because it is already prettier-hbs output; one single-quoted attribute
+in `fuzz-cases.mjs` would have failed the build. Every attribute value now reduces to one
+spelling, and the void slash goes with the whitespace before `>`.
+
+**Deciding from the wrong thing.** The express-hbs guard tested the *stripped* comment body, so
+it could not tell `{{!< layout}}` from `{{! < layout}}`: it unpadded `{{! <b> is prose}}` and
+manufactured a layout directive out of a comment about one. The parser decides, from the source.
+
+**Two smaller.** Nine `as TextNode` / `as ElementNode` casts the compiler never needed, against
+the `no-default-type-casts` rule and a cast-free line two lines away. And `printAny`'s
+`UnmatchedNode` arm, unreachable but drifted from `unmatchedPieces` - it now calls it rather than
+carrying a second copy.
+
+**Three the widened fuzz corpus then found.** Adding those cases to `fuzz-cases.mjs` shifted the
+generator enough to turn up a family of layout bugs around verbatim content, none of them new
+and none visible at the default 400 cases. `assemble` glued a hard space to its neighbours, so
+everything downstream of a standalone-sensitive statement became one `fill` item that could not
+break. A glued run holding a literal line measured as fitting - `fits` stops at the first hard
+line - and was then printed flat, over width, with the groups after that line never measured; it
+is a `group` now, so `propagateBreaks` marks it and `fits` refuses it. And `UnmatchedNode` was
+missing from `standaloneStatements`: its text is verbatim and may open with a comment, so
+wrapping the space before a `prettier-ignore` region made that comment standalone and Handlebars
+deleted the space from the page. Both edges of the region are pinned now.
+
+The gates run at 4000 cases across six seeds, not just the committed one. Everything above
+passed 400.
 
 ## 9. Risks
 

@@ -1,9 +1,9 @@
 import {
+  AttributeValue,
+  AttributeValuePart,
   Program,
   Node,
   ElementAttribute,
-  ElementNode,
-  TextNode,
   MustacheStatement,
   BlockStatement,
   ElseBranch,
@@ -13,15 +13,34 @@ import {
   ParseEndReason,
   UnmatchedNode,
 } from './types';
-import { voidElements, rawTextElements, whitespaceSensitiveRawTextElements } from 'template-format-core';
+import { voidElements, rawTextElements } from 'template-format-core';
 import { locEnd, locStart, normalizeInput, withOptionalRange, withRange } from 'template-format-core';
 import { parseCall } from './expression';
+import { scanPastQuotes } from './scan';
 import { TemplateSyntaxError } from './errors';
-import type { TemplateToken as MustacheToken } from 'template-format-core';
-import { whitespace } from 'template-format-core';
-import { handlebarsDialect } from './dialects/handlebars/tokens';
+import type { HandlebarsToken as MustacheToken } from './dialects/handlebars/tokens';
+import * as whitespace from './whitespace';
+import {
+  handlebarsDialect,
+  handlebarsRawBlockCloser,
+  handlebarsRawBlockName,
+  isHandlebarsBlockComment,
+} from './dialects/handlebars/tokens';
 
 export { locEnd, locStart };
+
+/* Built from the shared class so the character list stays written in one place. */
+const leadingWhitespace = new RegExp(`^${whitespace.htmlRun.source}`, 'u');
+
+/* HTML's lexical classes, composed from the whitespace list rather than repeating it - both
+ * embed it, and a second hand-written copy is what `whitespace.ts` exists to prevent. They
+ * live here because the tokenizer below is the only thing that reads them. */
+
+/** What an attribute name is made of: anything but whitespace and the characters that end one. */
+const attributeNameCharacter = new RegExp(`[^${whitespace.htmlCharacters}"'<>/=]`, 'u');
+
+/** What ends a tag name. HTML's tag-name state leaves on whitespace, `/` or `>`, and nothing else. */
+const tagNameTerminator = new RegExp(`[${whitespace.htmlCharacters}/>]`, 'u');
 
 interface ParseResult {
   nodes: Node[];
@@ -30,9 +49,23 @@ interface ParseResult {
   endToken?: MustacheToken;
   /** Where the terminator starts, i.e. where the children's content span ends. */
   contentEnd?: number;
+  /** How the author spelled the closing tag, which need not match the opening one's case. */
+  closeTag?: string;
 }
 
-const templateDialect = handlebarsDialect;
+/* Destructured rather than wrapped: seven of these had a one-line function around them whose
+ * only job was to give the dialect member a local name. */
+const {
+  openDelimiter,
+  isEscapedOpen,
+  parseToken: parseMustacheToken,
+  findNextOpen: findNextHandlebarsOpen,
+  isDynamicElementStart: isDynamicTagStart,
+  consumeRawBlock,
+  getBlockExpression,
+  getBlockPrefix,
+  shouldPreserveTokenVerbatim: shouldPreserveMustacheVerbatim,
+} = handlebarsDialect;
 
 export function parse(text: string): Program {
   const normalizedText = normalizeInput(text);
@@ -58,50 +91,30 @@ function fail(message: string, start: number, end: number): never {
 
 /* The dialect reports an unterminated token as one that ends at EOF, which is also what a token
  * ending the file looks like; the closing delimiter is what tells them apart. */
-function isTerminatedToken(text: string, token: MustacheToken): boolean {
-  const close = token.triple ? '}}}' : '}}';
-  const delimiter = text.startsWith('{{!--', token.start) || text.startsWith('{{{!--', token.start) ? `--${close}` : close;
+/* Where a raw block at `position` ends, or null if there is not one there. A body Handlebars
+ * emits literally is copied through wherever it appears; one that never closes is rejected
+ * wherever it appears too. */
+function consumeTerminatedRawBlock(text: string, position: number, rangeOffset: number): number | null {
+  const end = consumeRawBlock(text, position);
 
-  return token.end - delimiter.length >= token.start && text.startsWith(delimiter, token.end - delimiter.length);
-}
-
-/* Same for raw blocks, except the closer carries the block's own name. */
-function isTerminatedRawBlock(text: string, start: number, end: number): boolean {
-  const openEnd = text.indexOf('}}}}', start + 4);
-  if (openEnd === -1) {
-    return false;
+  if (end === null) {
+    return null;
   }
 
-  const name = rawBlockName(text, start, openEnd);
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  /* Same as for a mustache, except the closer carries the block's own name - and the name is
+   * read once here rather than once to decide and again to name it in the message. */
+  const openEnd = text.indexOf('}}}}', position + 4);
+  const name = openEnd === -1 ? '' : handlebarsRawBlockName(text, position, openEnd);
 
-  return new RegExp(`\\{\\{\\{\\{\\s*~?\\s*/\\s*${escaped}\\s*~?\\s*\\}\\}\\}\\}$`, 'u').test(text.slice(start, end));
-}
+  if (name === '' || !text.slice(position, end).endsWith(handlebarsRawBlockCloser(name))) {
+    fail(`unterminated raw block: expected ${handlebarsRawBlockCloser(name)}`, rangeOffset + position, rangeOffset + end);
+  }
 
-function rawBlockName(text: string, start: number, openEnd: number): string {
-  const inner = text.slice(start + 4, openEnd).trim().replace(/^~/u, '').replace(/~$/u, '').trim();
-
-  return inner.split(/\s+/u)[0] ?? '';
+  return end;
 }
 
 function startsTemplateTag(text: string, position: number): boolean {
-  return text.startsWith(templateDialect.openDelimiter, position) && !templateDialect.isEscapedOpen(text, position);
-}
-
-function parseMustacheToken(text: string, position: number): MustacheToken {
-  return templateDialect.parseToken(text, position);
-}
-
-function findNextHandlebarsOpen(text: string, position: number): number {
-  return templateDialect.findNextOpen(text, position);
-}
-
-function isDynamicTagStart(text: string, position: number): boolean {
-  return templateDialect.isDynamicElementStart(text, position);
-}
-
-function consumeRawBlock(text: string, position: number): number | null {
-  return templateDialect.consumeRawBlock(text, position);
+  return text.startsWith(openDelimiter, position) && !isEscapedOpen(text, position);
 }
 
 function parseChildren(
@@ -126,8 +139,7 @@ function parseChildren(
             type: 'TextNode',
             chars: rawContent,
             verbatim: true,
-            preserveWhitespace: whitespaceSensitiveRawTextElements.has(endTag.toLowerCase()),
-          } as TextNode,
+          },
           rangeOffset + pos,
           rangeOffset + contentEnd,
         ),
@@ -140,47 +152,48 @@ function parseChildren(
     }
 
     const nextPos = closeIdx >= 0 ? closeIdx + 1 : contentEnd;
+    const closeTag = closeStart >= 0 ? readCloseTagSource(text, closeStart, closeIdx) : undefined;
 
-    return { nodes, position: nextPos, endReason: closeStart >= 0 ? 'tagClose' : null, contentEnd };
+    return { nodes, position: nextPos, endReason: closeStart >= 0 ? 'tagClose' : null, contentEnd, closeTag };
   }
 
-  while (pos < text.length) {
-    const rawBlockEnd = consumeRawBlock(text, pos);
-    if (rawBlockEnd !== null) {
-      if (!isTerminatedRawBlock(text, pos, rawBlockEnd)) {
-        const openEnd = text.indexOf('}}}}', pos + 4);
-        const name = openEnd === -1 ? '' : rawBlockName(text, pos, openEnd);
-        fail(`unterminated raw block: expected {{{{/${name}}}}}`, rangeOffset + pos, rangeOffset + rawBlockEnd);
-      }
+  /* The current block's terminator does not move while this call runs, and every position the
+   * loop reaches is at depth 0 inside it, so it is hoisted: recomputing it per open tag is
+   * quadratic in the number of mustaches in the block's body. */
+  const blockBoundary = endBlock ? findCurrentBlockBoundary(text, pos, endBlock) : -1;
 
-      nodes.push(createUnmatchedNode(text, pos, rawBlockEnd));
+  while (pos < text.length) {
+    const rawBlockEnd = consumeTerminatedRawBlock(text, pos, rangeOffset);
+    if (rawBlockEnd !== null) {
+      nodes.push(createUnmatchedNode(text, pos, rawBlockEnd, rangeOffset));
       pos = rawBlockEnd;
       continue;
     }
 
     const dynamicElementEnd = consumeDynamicElement(text, pos);
     if (dynamicElementEnd !== null) {
-      nodes.push(createUnmatchedNode(text, pos, dynamicElementEnd));
+      nodes.push(createUnmatchedNode(text, pos, dynamicElementEnd, rangeOffset));
       pos = dynamicElementEnd;
       continue;
     }
 
-    if (endTag && text.startsWith(`</${endTag}`, pos)) {
+    if (endTag && startsCloseTag(text, pos, endTag)) {
       const contentEnd = pos;
       const closeIdx = text.indexOf('>', pos);
       if (closeIdx < 0) {
         fail("unterminated tag: expected '>'", rangeOffset + pos, rangeOffset + text.length);
       }
 
+      const closeTag = readCloseTagSource(text, pos, closeIdx);
       pos = closeIdx + 1;
-      return { nodes, position: pos, endReason: 'tagClose', contentEnd };
+      return { nodes, position: pos, endReason: 'tagClose', contentEnd, closeTag };
     }
 
     if (startsTemplateTag(text, pos)) {
       const token = parseMustacheToken(text, pos);
 
-      if (!isTerminatedToken(text, token)) {
-        const [open, close] = text.startsWith('{{!--', pos)
+      if (!token.terminated) {
+        const [open, close] = isHandlebarsBlockComment(text, pos)
           ? ['{{!--', '--}}']
           : token.triple
             ? ['{{{', '}}}']
@@ -189,13 +202,13 @@ function parseChildren(
       }
 
       if (shouldPreserveMustacheVerbatim(token) && !(endBlock && token.kind === 'else')) {
-        nodes.push(createUnmatchedNode(text, pos, token.end));
+        nodes.push(createUnmatchedNode(text, pos, token.end, rangeOffset));
         pos = token.end;
         continue;
       }
 
       if (token.kind === 'comment') {
-        const ignoreDirective = getPrettierIgnoreDirective(token.rawContent);
+        const ignoreDirective = getPrettierIgnoreDirective(commentBody(token));
 
         if (ignoreDirective === 'start') {
           const ignoreStart = pos;
@@ -209,7 +222,7 @@ function parseChildren(
             );
           }
 
-          nodes.push(createUnmatchedNode(text, ignoreStart, ignoreEnd));
+          nodes.push(createUnmatchedNode(text, ignoreStart, ignoreEnd, rangeOffset));
           pos = ignoreEnd;
           continue;
         }
@@ -219,12 +232,12 @@ function parseChildren(
 
           /* Nothing follows to ignore, so the directive is only a comment. */
           if (ignoredEnd <= token.end) {
-            nodes.push(createComment(token.rawContent, rangeOffset + pos, rangeOffset + token.end));
+            nodes.push(createComment(token, rangeOffset + pos, rangeOffset + token.end));
             pos = token.end;
             continue;
           }
 
-          nodes.push(createUnmatchedNode(text, pos, ignoredEnd));
+          nodes.push(createUnmatchedNode(text, pos, ignoredEnd, rangeOffset));
           pos = ignoredEnd;
           continue;
         }
@@ -239,7 +252,7 @@ function parseChildren(
       }
 
       if (token.kind === 'blockStart') {
-        if (!hasMatchingBlockEnd(text, token, pos)) {
+        if (!hasMatchingBlockEnd(text, token)) {
           fail(`unclosed block: expected {{/${token.name ?? ''}}}`, rangeOffset + pos, rangeOffset + token.end);
         }
 
@@ -263,36 +276,9 @@ function parseChildren(
         );
       }
 
-      if (token.kind === 'partial') {
-        nodes.push(createPartial(token.content, token.trimOpen, token.trimClose, rangeOffset + pos, rangeOffset + token.end, rangeOffset + contentOffset(text, pos, token.end, token.content)));
-        pos = token.end;
-        continue;
-      }
-
-      if (token.specialForm === 'decorator') {
-        nodes.push(
-          createDecorator(
-            token.content.slice(1).trim(),
-            token.trimOpen,
-            token.trimClose,
-            rangeOffset + pos,
-            rangeOffset + token.end,
-            rangeOffset + contentOffset(text, pos, token.end, token.content.slice(1).trim()),
-          ),
-        );
-        pos = token.end;
-        continue;
-      }
-
-      if (token.kind === 'comment') {
-        nodes.push(createComment(token.rawContent, rangeOffset + pos, rangeOffset + token.end));
-        pos = token.end;
-        continue;
-      }
-
-      nodes.push(
-        createMustache(token.content, token.triple, token.trimOpen, token.trimClose, rangeOffset + pos, rangeOffset + token.end, rangeOffset + contentOffset(text, pos, token.end, token.content)),
-      );
+      /* Blocks and terminators are handled above, so the only kind left that `createStatement`
+       * declines is a stray `{{else}}` with nothing open - kept as a mustache. */
+      nodes.push(createStatement(text, token, pos, rangeOffset) ?? createMustache(text, token, pos, rangeOffset));
       pos = token.end;
       continue;
     }
@@ -300,10 +286,13 @@ function parseChildren(
     if (text[pos] === '<') {
       if (text.startsWith('<!', pos) && !text.startsWith('<!--', pos)) {
         const closeIdx = text.indexOf('>', pos + 2);
-        const end = closeIdx >= 0 ? closeIdx + 1 : text.length;
+        /* Unterminated, so the declaration runs to the end of the input - but its trailing
+         * whitespace is still the author's. Folding that into the verbatim run makes the
+         * printer's own final newline additive, and the file grows a line on every format. */
+        const end = closeIdx >= 0 ? closeIdx + 1 : trimTrailingWhitespace(text, pos);
         nodes.push(
           withRange(
-            { type: 'TextNode', chars: text.slice(pos, end), verbatim: true } as TextNode,
+            { type: 'TextNode', chars: text.slice(pos, end), verbatim: true },
             rangeOffset + pos,
             rangeOffset + end,
           ),
@@ -316,7 +305,7 @@ function parseChildren(
         const nextMarkup = findNextMarkup(text, pos + 1);
         nodes.push(
           withRange(
-            { type: 'TextNode', chars: text.slice(pos, nextMarkup) } as TextNode,
+            { type: 'TextNode', chars: text.slice(pos, nextMarkup) },
             rangeOffset + pos,
             rangeOffset + nextMarkup,
           ),
@@ -335,7 +324,7 @@ function parseChildren(
 
         nodes.push(
           withRange(
-            { type: 'TextNode', chars: text.slice(pos, end), verbatim: true } as TextNode,
+            { type: 'TextNode', chars: text.slice(pos, end), verbatim: true },
             rangeOffset + pos,
             rangeOffset + end,
           ),
@@ -344,17 +333,17 @@ function parseChildren(
         continue;
       }
 
-      const tagResult = parseTag(text, pos);
+      const tagResult = parseTag(text, pos, rangeOffset);
 
       if (!tagResult.terminated) {
         fail("unterminated tag: expected '>'", rangeOffset + pos, rangeOffset + tagResult.end);
       }
 
       if (tagResult.kind === 'close') {
-        if (endTag && tagResult.tag === endTag) {
+        if (endTag && sameTag(tagResult.tag, endTag)) {
           const contentEnd = pos;
           pos = tagResult.end;
-          return { nodes, position: pos, endReason: 'tagClose', contentEnd };
+          return { nodes, position: pos, endReason: 'tagClose', contentEnd, closeTag: tagResult.source };
         }
 
         fail(
@@ -384,7 +373,8 @@ function parseChildren(
               attributes: tagResult.attributes,
               children: [],
               selfClosing: true,
-            } as ElementNode,
+              attributesRange: tagResult.attributesRange,
+            },
             rangeOffset + pos,
             rangeOffset + tagResult.end,
           ),
@@ -393,9 +383,7 @@ function parseChildren(
         continue;
       }
 
-      const blockBoundary = endBlock ? findCurrentBlockBoundary(text, tagResult.end, endBlock) : -1;
-
-      if (!hasMatchingTagEnd(text, tagResult.tag, tagResult.end, blockBoundary)) {
+      if (findMatchingTagClose(text, tagResult.tag, tagResult.end, blockBoundary) === null) {
         fail(`unclosed tag: expected </${tagResult.tag}>`, rangeOffset + pos, rangeOffset + tagResult.end);
       }
 
@@ -404,6 +392,7 @@ function parseChildren(
         position: newPos,
         endReason: childEndReason,
         contentEnd,
+        closeTag,
       } = parseChildren(text, tagResult.end, tagResult.tag, null, rangeOffset);
       if (childEndReason !== 'tagClose') {
         fail(`unclosed tag: expected </${tagResult.tag}>`, rangeOffset + pos, rangeOffset + tagResult.end);
@@ -417,8 +406,10 @@ function parseChildren(
             attributes: tagResult.attributes,
             children,
             selfClosing: false,
+            ...(closeTag && closeTag !== tagResult.tag ? { closeTag } : {}),
+            attributesRange: tagResult.attributesRange,
             contentRange: [rangeOffset + tagResult.end, rangeOffset + (contentEnd ?? newPos)],
-          } as ElementNode,
+          },
           rangeOffset + pos,
           rangeOffset + newPos,
         ),
@@ -441,27 +432,50 @@ function parseChildren(
   return { nodes, position: pos, endReason: null };
 }
 
-function hasMatchingBlockEnd(text: string, token: MustacheToken, start: number): boolean {
-  return findMatchingBlockEnd(text, token, start) !== null;
+function hasMatchingBlockEnd(text: string, token: MustacheToken): boolean {
+  return findMatchingBlockEnd(text, token) !== null;
+}
+
+/**
+ * The mustaches in `text` from `from` onwards, minus those inside a `{{{{raw}}}}` body:
+ * Handlebars does not parse one, so a `{{#if}}` in there opens nothing.
+ *
+ * Deliberately does *not* skip HTML comments or `<script>`: Handlebars has no idea what HTML is
+ * and rejects `{{#if a}}<!-- {{#if b}} -->{{/if}}`, so these scans must see that `{{#if b}}`.
+ */
+function* mustachesFrom(text: string, from: number): Generator<MustacheToken> {
+  let pos = from;
+
+  while (pos < text.length) {
+    const next = findNextHandlebarsOpen(text, pos);
+    if (next === -1) {
+      return;
+    }
+
+    const rawBlockEnd = consumeRawBlock(text, next);
+    if (rawBlockEnd !== null && rawBlockEnd > next) {
+      pos = rawBlockEnd;
+      continue;
+    }
+
+    const token = parseMustacheToken(text, next);
+    yield token;
+    pos = token.end > next ? token.end : next + 2;
+  }
 }
 
 /** Where the block opened by `token` closes, or null if it never does. */
-function findMatchingBlockEnd(text: string, token: MustacheToken, start: number): number | null {
+function findMatchingBlockEnd(text: string, token: MustacheToken): number | null {
   if (!token.name) {
     return null;
   }
 
   let depth = 0;
-  let pos = start + 1;
 
-  while (pos < text.length) {
-    const next = findNextHandlebarsOpen(text, pos);
-    if (next === -1) {
-      return null;
-    }
-
-    const candidate = parseMustacheToken(text, next);
-
+  /* From the end of the opening tag, which the token already knows - a caller passing a start
+   * position instead would have `findNextHandlebarsOpen` land on a `{{` inside the tag's own
+   * string literal, reading `{{#if (eq a "{{")}}` as a mustache that never closes. */
+  for (const candidate of mustachesFrom(text, token.end)) {
     if (candidate.kind === 'blockStart' && candidate.name === token.name) {
       depth += 1;
     } else if (candidate.kind === 'blockEnd' && candidate.name === token.name) {
@@ -471,8 +485,6 @@ function findMatchingBlockEnd(text: string, token: MustacheToken, start: number)
 
       depth -= 1;
     }
-
-    pos = candidate.end > next ? candidate.end : next + 2;
   }
 
   return null;
@@ -484,7 +496,7 @@ function parseBlock(
   rangeOffset = 0,
 ): { node: BlockStatement; next: number; closed: boolean } {
   const blockExpression = getBlockExpression(token);
-  const openInfo = parseExpression(
+  const openInfo = parseCall(
     blockExpression,
     rangeOffset + contentOffset(text, token.start, token.end, blockExpression),
   );
@@ -501,11 +513,10 @@ function parseBlock(
   /* A program ends where its terminator begins, not after it, so the body tiles the range. */
   const programBody = buildProgram(program, token.end, endToken?.start ?? afterProgram);
 
-  let inverseBody: Program = withRange(
-    { type: 'Program', body: [] },
-    rangeOffset + afterProgram,
-    rangeOffset + afterProgram,
-  );
+  /* Set only when the author wrote a bare `{{else}}`; otherwise the empty inverse is built at
+   * the end, once the closer's position is known. Anchoring it at `afterProgram` up here put it
+   * inside the else-if chain - a point belonging to a different section of the block. */
+  let inverseBody: Program | undefined;
   const inverseChain: ElseBranch[] = [];
   let finalPos = afterProgram;
   let closeToken = endReason === 'blockEnd' ? endToken : undefined;
@@ -518,11 +529,10 @@ function parseBlock(
 
     while (currentElseToken?.specialForm === 'elseIf') {
       const branchExpressionText = currentElseToken.content.replace(/^else\s+/, '');
-      const branchInfo = parseExpression(
+      const branchExpression = parseCall(
         branchExpressionText,
         rangeOffset + contentOffset(text, currentElseToken.start, currentElseToken.end, branchExpressionText),
       );
-      const { type: _branchType, ...branchExpression } = branchInfo;
       const {
         nodes: branchNodes,
         position: afterBranch,
@@ -571,15 +581,17 @@ function parseBlock(
     }
   }
 
-  // Drop the mustache-specific `type` field so we can build a proper BlockStatement
-  const { type: _ignored, ...expression } = openInfo;
+  const closerAnchor = closeToken?.start ?? finalPos;
 
   const node: BlockStatement = withRange(
     {
       type: 'BlockStatement',
       program: programBody,
       ...(inverseChain.length > 0 ? { inverseChain } : {}),
-      inverse: inverseBody,
+      /* An empty inverse sits where the block's closer starts: after every branch, before
+       * `{{/if}}`. It is a zero-width point, so it has to be a position the block actually
+       * owns. */
+      inverse: inverseBody ?? buildProgram([], closerAnchor, closerAnchor),
       ...(inverseTrimOpen ? { inverseTrimOpen } : {}),
       ...(inverseTrimClose ? { inverseTrimClose } : {}),
       blockPrefix,
@@ -587,7 +599,7 @@ function parseBlock(
       trimClose: token.trimClose,
       closeTrimOpen: closeToken?.trimOpen,
       closeTrimClose: closeToken?.trimClose,
-      ...expression,
+      ...openInfo,
     },
     rangeOffset + token.start,
     rangeOffset + finalPos,
@@ -596,24 +608,12 @@ function parseBlock(
   return { node, next: finalPos, closed: Boolean(closeToken) };
 }
 
-function getBlockExpression(token: MustacheToken): string {
-  return templateDialect.getBlockExpression(token);
-}
-
-function getBlockPrefix(token: MustacheToken): '#' | '#>' | '#*' | '^' | '<' | '$' {
-  return templateDialect.getBlockPrefix(token);
-}
-
-function hasMatchingTagEnd(text: string, tag: string, start: number, limit = -1): boolean {
-  return findMatchingTagClose(text, tag, start, limit) !== null;
-}
-
 type PrettierIgnoreDirective = 'next' | 'start' | 'end' | null;
 
 /**
- * The directive has to *be* the comment, not appear somewhere inside it. Matching on `includes`
- * meant a comment that merely mentioned `prettier-ignore` silently stopped the next node from
- * being formatted - and a mention of `prettier-ignore-start` opened a region.
+ * The directive has to *be* the comment, not appear somewhere inside it: on `includes`, a
+ * comment merely mentioning `prettier-ignore` would silently suppress the next node, and one
+ * mentioning `prettier-ignore-start` would open a region.
  */
 function getPrettierIgnoreDirective(rawContent: string): PrettierIgnoreDirective {
   switch (rawContent.toLowerCase().replace(/^\s*!(?:-{2})?/u, '').trim()) {
@@ -629,23 +629,12 @@ function getPrettierIgnoreDirective(rawContent: string): PrettierIgnoreDirective
 }
 
 function findPrettierIgnoreEnd(text: string, position: number): number | null {
-  let pos = position;
-
-  while (pos < text.length) {
-    const next = findNextHandlebarsOpen(text, pos);
-
-    if (next === -1) {
-      return null;
-    }
-
-    const token = parseMustacheToken(text, next);
-    const directive = getPrettierIgnoreDirective(token.rawContent);
-
-    if (token.kind === 'comment' && directive === 'end') {
+  for (const token of mustachesFrom(text, position)) {
+    /* Kind first: `commentBody` and the directive lookup are wasted on every mustache, block and
+     * partial the scan walks past on the way. */
+    if (token.kind === 'comment' && getPrettierIgnoreDirective(commentBody(token)) === 'end') {
       return token.end;
     }
-
-    pos = token.end > next ? token.end : next + 2;
   }
 
   return null;
@@ -655,11 +644,9 @@ function findPrettierIgnoreEnd(text: string, position: number): number | null {
  * How far `{{! prettier-ignore }}` reaches: to the end of the one node that follows it, or
  * nowhere if that node's extent cannot be determined.
  *
- * It scans rather than parses. Parsing meant a nested `parseChildren` ran past the enclosing
- * container - handing an element its own `</div>`, or a block its own `{{/if}}` - and meant this
- * could `fail()`, so a directive meant to suppress formatting could reject the file instead.
- * Returning `position` says "nothing to ignore"; the caller then treats the directive as a plain
- * comment and the markup after it is parsed, and reported on, as usual.
+ * It scans rather than parses: a nested `parseChildren` would run past the enclosing container,
+ * handing an element its own `</div>`, and could `fail()` - leaving a directive meant to
+ * suppress formatting able to reject the file. `position` means "nothing to ignore".
  */
 function consumeNextNode(text: string, position: number): number {
   if (position >= text.length) {
@@ -674,11 +661,11 @@ function consumeNextNode(text: string, position: number): number {
       return position;
     }
 
-    return token.kind === 'blockStart' ? findMatchingBlockEnd(text, token, position) ?? position : token.end;
+    return token.kind === 'blockStart' ? findMatchingBlockEnd(text, token) ?? position : token.end;
   }
 
   if (text[position] === '<') {
-    const tagResult = parseTag(text, position);
+    const tagResult = scanTag(text, position);
 
     if (!tagResult.terminated || tagResult.kind === 'close') {
       return position;
@@ -712,48 +699,147 @@ function consumeNextNode(text: string, position: number): number {
   return consumeNextNode(text, nextMarkup);
 }
 
-function createUnmatchedNode(text: string, start: number, end: number): UnmatchedNode {
-  return withRange({ type: 'UnmatchedNode', raw: text.slice(start, end) }, start, end);
+function createUnmatchedNode(text: string, start: number, end: number, rangeOffset: number): UnmatchedNode {
+  return withRange(
+    { type: 'UnmatchedNode', raw: text.slice(start, end) },
+    rangeOffset + start,
+    rangeOffset + end,
+  );
 }
 
 /**
- * `terminated` is false when the tag ran to EOF without a `>`, which is also how an unterminated
- * attribute value shows up. It is reported rather than thrown because the lookahead scanners call
- * this too, and a throw from a predicate would surface a later problem than the author's.
+ * Where a tag ends, what it is called and whether it closed - without building a single node and
+ * without rejecting anything.
+ *
+ * Lookahead has to be total: callers scan regions they may go on to skip, including a
+ * `{{! prettier-ignore }}` body, so a `parseTag` here let the directive reject the very file it
+ * was written to protect. `terminated` is false when the tag ran to EOF, which is also how an
+ * unterminated attribute value shows up.
  */
-function parseTag(text: string, position: number):
-  | { kind: 'open'; tag: string; attributes: ElementAttribute[]; end: number; terminated: boolean }
-  | { kind: 'selfClosing'; tag: string; attributes: ElementAttribute[]; end: number; terminated: boolean }
-  | { kind: 'close'; tag: string; end: number; terminated: boolean } {
+function scanTag(
+  text: string,
+  position: number,
+): { kind: 'open' | 'selfClosing' | 'close'; tag: string; end: number; terminated: boolean } {
+  let pos = position + 1;
+  const closing = text[pos] === '/';
+  if (closing) {
+    pos += 1;
+  }
+
+  const { value: tag, next } = readName(text, pos);
+  pos = next;
+
+  const kindAt = (selfClosed: boolean): ParsedTag['kind'] => {
+    if (closing) {
+      return 'close';
+    }
+
+    return selfClosed || voidElements.has(tag.toLowerCase()) ? 'selfClosing' : 'open';
+  };
+
+  /* A quote only delimits a value directly after `=`, whitespace aside. Treating every quote as
+   * a delimiter would make `title=a"b'c>` swallow the rest of the file hunting a closing `"`. */
+  let afterEquals = false;
+
+  while (pos < text.length) {
+    if (startsTemplateTag(text, pos)) {
+      const token = parseMustacheToken(text, pos);
+      pos = token.end > pos ? token.end : pos + 2;
+      continue;
+    }
+
+    const char = text[pos];
+
+    if (whitespace.html.test(char)) {
+      pos += 1;
+      continue;
+    }
+
+    if (char === '=') {
+      afterEquals = true;
+      pos += 1;
+      continue;
+    }
+
+    if (afterEquals && char !== '>') {
+      pos =
+        char === '"' || char === "'"
+          ? readQuotedAttributeValue(text, pos + 1, char).position
+          : readUnquotedValueEnd(text, pos);
+      afterEquals = false;
+      continue;
+    }
+
+    if (isSelfClosingSlash(text, pos)) {
+      return { kind: kindAt(true), tag, end: pos + 2, terminated: true };
+    }
+
+    if (char === '>') {
+      return { kind: kindAt(false), tag, end: pos + 1, terminated: true };
+    }
+
+    afterEquals = false;
+    pos += 1;
+  }
+
+  return { kind: kindAt(false), tag, end: pos, terminated: false };
+}
+
+type ParsedTag =
+  | { kind: 'open'; tag: string; attributes: ElementAttribute[]; attributesRange: [number, number]; end: number; terminated: boolean }
+  | { kind: 'selfClosing'; tag: string; attributes: ElementAttribute[]; attributesRange: [number, number]; end: number; terminated: boolean }
+  | { kind: 'close'; tag: string; source: string; end: number; terminated: boolean };
+
+function parseTag(text: string, position: number, rangeOffset = 0): ParsedTag {
   let pos = position + 1; // skip '<'
 
   if (text[pos] === '/') {
     pos += 1;
     const { value: tag, next } = readName(text, pos);
     const closeIdx = text.indexOf('>', next);
-    return { kind: 'close', tag, end: closeIdx >= 0 ? closeIdx + 1 : text.length, terminated: closeIdx >= 0 };
+    return {
+      kind: 'close',
+      tag,
+      source: readCloseTagSource(text, position, closeIdx),
+      end: closeIdx >= 0 ? closeIdx + 1 : text.length,
+      terminated: closeIdx >= 0,
+    };
   }
 
   const { value: tag, next } = readName(text, pos);
   pos = next;
   const attributes: ElementAttribute[] = [];
+  const headStart = pos;
+  const span = (headEnd: number): [number, number] => [rangeOffset + headStart, rangeOffset + headEnd];
   let glued = false;
+  let attrStart = pos;
 
-  /* Whether the author left a space before this attribute. The first one always needs one, or it
-   * would run into the tag name. */
-  const add = (attribute: ElementAttribute) => {
-    attributes.push(glued && attributes.length > 0 ? { ...attribute, glued: true } : attribute);
+  /* `glued` is whether the author left a space before this attribute. That includes the first
+   * one: running into the tag name is what makes `<h{{level}}>` a heading rather than an `<h>`
+   * with an attribute. The span is what lets `findTilingViolations` see that an attribute
+   * accounts for all of the source it was read from. */
+  const add = (attribute: ElementAttribute, end: number) => {
+    const marked = glued ? { ...attribute, glued: true } : attribute;
+    attributes.push(withRange(marked, rangeOffset + attrStart, rangeOffset + end));
   };
 
   while (pos < text.length) {
-    skipWhitespace(text, () => pos++, () => pos);
+    pos = skipWhitespace(text, pos);
+
+    /* Trailing whitespace can run out the input. Falling through would ask `parseAttribute` to
+     * read past the end and report `unexpected undefined`, when the tag is simply unterminated. */
+    if (pos >= text.length) {
+      break;
+    }
+
     /* Look at the character before the attribute rather than at whether whitespace was skipped
      * here: some of the attribute readers consume their own trailing space. */
-    glued = pos > 0 && !/\s/u.test(text[pos - 1]);
+    glued = pos > 0 && !whitespace.html.test(text[pos - 1]);
+    attrStart = pos;
 
     const dynamicAttribute = parseDynamicAttribute(text, pos);
     if (dynamicAttribute) {
-      add(dynamicAttribute.attribute);
+      add(dynamicAttribute.attribute, dynamicAttribute.position);
       pos = dynamicAttribute.position;
       continue;
     }
@@ -761,111 +847,55 @@ function parseTag(text: string, position: number):
     if (startsTemplateTag(text, pos)) {
       const token = parseMustacheToken(text, pos);
 
-      // a comment in attribute position
-      if (token.kind === 'comment') {
-        add({
-          type: 'AttributeBlock',
-          block: createComment(token.rawContent, pos, token.end),
-        });
+      const statement = createStatement(text, token, pos, rangeOffset);
+      if (statement) {
+        add({ type: 'AttributeBlock', block: statement }, token.end);
         pos = token.end;
         continue;
       }
 
-      // a partial in attribute position
-      if (token.kind === 'partial') {
-        add({
-          type: 'AttributeBlock',
-          block: createPartial(token.content, token.trimOpen, token.trimClose, pos, token.end, contentOffset(text, pos, token.end, token.content)),
-        });
-        pos = token.end;
-        continue;
-      }
-
-      // standalone decorator in the opening tag
-      if (token.specialForm === 'decorator') {
-        add({
-          type: 'AttributeBlock',
-          block: createDecorator(
-            token.content.slice(1).trim(),
-            token.trimOpen,
-            token.trimClose,
-            pos,
-            token.end,
-            contentOffset(text, pos, token.end, token.content.slice(1).trim()),
-          ),
-        });
-        pos = token.end;
-        continue;
-      }
-
-      // a plain {{ mustache }}
-      if (token.kind === 'mustache') {
-        add({
-          type: 'AttributeBlock',
-          block: createMustache(token.content, token.triple, token.trimOpen, token.trimClose, pos, token.end, contentOffset(text, pos, token.end, token.content)),
-        });
-        pos = token.end;
-        continue;
-      }
-
-      // {{#block}} ... {{/block}} in attribute position
-      if (token.kind === 'blockStart') {
-        if (!hasMatchingBlockEnd(text, token, pos)) {
-          // no close, so keep it as an unmatched fragment
-          add({
-            type: 'AttributeBlock',
-            block: createMustache(token.content, token.triple, token.trimOpen, token.trimClose, pos, token.end, contentOffset(text, pos, token.end, token.content)),
-          });
-          pos = token.end;
-          continue;
-        }
-
-        const { node, next } = parseBlock(text, token);
-        add({
-          type: 'AttributeBlock',
-          block: node,
-        });
+      if (token.kind === 'blockStart' && hasMatchingBlockEnd(text, token)) {
+        const { node, next } = parseBlock(text, token, rangeOffset);
+        add({ type: 'AttributeBlock', block: node }, next);
         pos = next;
         continue;
       }
 
-      // else / blockEnd in attribute position: odd, but not worth failing over
-      add({
-        type: 'AttributeBlock',
-        block: createMustache(token.content, token.triple, token.trimOpen, token.trimClose, pos, token.end, contentOffset(text, pos, token.end, token.content)),
-      });
+      /* A block that never closes, or a stray `{{else}}` / `{{/if}}`. Being unbalanced is not
+       * itself grounds to reject here - the tag's own extent is already fixed - so they are kept
+       * as a mustache. `createMustache` still parses the call, so what is *inside* one can be
+       * rejected the same as anywhere else. */
+      add({ type: 'AttributeBlock', block: createMustache(text, token, pos, rangeOffset) }, token.end);
       pos = token.end;
       continue;
     }
 
     if (text[pos] === '/' && text[pos + 1] === '>') {
+      const headEnd = pos;
       pos += 2;
-      return { kind: 'selfClosing', tag, attributes, end: pos, terminated: true };
+      return { kind: 'selfClosing', tag, attributes, attributesRange: span(headEnd), end: pos, terminated: true };
     }
     if (text[pos] === '>') {
+      const headEnd = pos;
       pos += 1;
       const kind = voidElements.has(tag.toLowerCase()) ? 'selfClosing' : 'open';
-      return { kind, tag, attributes, end: pos, terminated: true };
+      return { kind, tag, attributes, attributesRange: span(headEnd), end: pos, terminated: true };
     }
 
-    const beforeAttr = pos;
-    const attr = parseAttribute(text, pos);
+    const attr = parseAttribute(text, pos, rangeOffset);
 
+    /* Every remaining character is one an attribute name may start with, so there is nothing
+     * left to skip over - and skipping is what quietly deleted the author's markup. */
     if (!attr) {
-      pos = beforeAttr + 1;
-      continue;
+      fail(`unexpected ${text[pos]} in <${tag}>: expected an attribute name or '>'`, rangeOffset + pos, rangeOffset + pos + 1);
     }
 
-    add(attr.attribute);
+    add(attr.attribute, attr.position);
     pos = attr.position;
-
-    if (pos <= beforeAttr) {
-      pos = beforeAttr + 1;
-    }
   }
 
   const kind = voidElements.has(tag.toLowerCase()) ? 'selfClosing' : 'open';
-  return { kind, tag, attributes, end: pos, terminated: false };
+  return { kind, tag, attributes, attributesRange: span(pos), end: pos, terminated: false };
 }
 
 function consumeInvalidVoidElementClose(text: string, position: number, tag: string): number | null {
@@ -873,10 +903,60 @@ function consumeInvalidVoidElementClose(text: string, position: number, tag: str
     return null;
   }
 
-  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const match = text.slice(position).match(new RegExp(`^[\\t\\n\\f\\r ]*</\\s*${escapedTag}\\s*>`, 'i'));
+  const afterGap = skipWhitespace(text, position);
+  if (!text.startsWith('</', afterGap)) {
+    return null;
+  }
 
-  return match ? position + match[0].length : null;
+  const { value, next } = readName(text, afterGap + 2);
+  const end = skipWhitespace(text, next);
+
+  return sameTag(value, tag) && text[end] === '>' ? end + 1 : null;
+}
+
+/* HTML tag names are case-insensitive, so `<DIV>x</div>` is one element. Comparing them
+ * verbatim rejected it as unclosed, while the `voidElements` and `rawTextElements` lookups two
+ * lines away had been lowercasing all along. */
+function sameTag(one: string, other: string): boolean {
+  return one.toLowerCase() === other.toLowerCase();
+}
+
+/**
+ * Whether a close tag for exactly `tag` starts here.
+ *
+ * The name has to end where `tag` does. On a prefix comparison `</bdi>` would close a `<b>`,
+ * deleting `di` from the source and pointing any error at the next, well-formed close tag.
+ */
+function startsCloseTag(text: string, position: number, tag: string): boolean {
+  if (!text.startsWith('</', position)) {
+    return false;
+  }
+
+  const { value: name, next } = readName(text, position + 2);
+
+  return sameTag(name, tag) && (next >= text.length || tagNameTerminator.test(text[next]));
+}
+
+/* Everything between `</` and `>`. HTML keeps only the name and throws the rest away, but it is
+ * still the author's source: `</h{{level}}>` has to come back out spelled that way. Whitespace
+ * runs collapse so a close tag can never put a raw newline into a doc. */
+function readCloseTagSource(text: string, position: number, closeIdx: number): string {
+  return text
+    .slice(position + 2, closeIdx >= 0 ? closeIdx : text.length)
+    .trim()
+    .replace(whitespace.htmlRunGlobal, ' ');
+}
+
+/* One past the last non-whitespace character, leaving the author's trailing whitespace to the
+ * caller instead of burying it inside a node that prints verbatim. */
+function trimTrailingWhitespace(text: string, from: number): number {
+  let end = text.length;
+
+  while (end > from && whitespace.html.test(text[end - 1])) {
+    end -= 1;
+  }
+
+  return end;
 }
 
 function isTagStart(text: string, position: number): boolean {
@@ -884,22 +964,47 @@ function isTagStart(text: string, position: number): boolean {
     return false;
   }
 
-  const next = text[position + 1];
-  return /[A-Za-z!/]/.test(next ?? '') || next === '/';
+  return /[A-Za-z!/]/u.test(text[position + 1] ?? '');
 }
 
-function parseAttribute(text: string, position: number): { attribute: ElementAttribute; position: number } | null {
+/**
+ * Where an unquoted attribute value ends. HTML's unquoted-value state ends at whitespace or `>`
+ * and nowhere else, so a `/` is content: breaking on it would drop the trailing slash of
+ * `src=/a/b/` and make `<a href=/path/>t</a>` a self-closing `<a>` that rejects its own `</a>`.
+ * `scanTag` reads values with this too, so its idea of where a tag ends matches the parser's;
+ * were they to disagree, a `{{! prettier-ignore }}` region could stop mid-tag.
+ */
+function readUnquotedValueEnd(text: string, position: number): number {
   let pos = position;
-  skipWhitespace(text, () => pos++, () => pos);
-  const attrStart = pos;
-  const { value: name, next } = readName(text, pos);
+
+  while (pos < text.length && text[pos] !== '>' && !whitespace.html.test(text[pos])) {
+    if (startsTemplateTag(text, pos)) {
+      const token = parseMustacheToken(text, pos);
+      pos = token.end > pos ? token.end : pos + 2;
+      continue;
+    }
+
+    pos += 1;
+  }
+
+  return pos;
+}
+
+function parseAttribute(
+  text: string,
+  position: number,
+  rangeOffset = 0,
+): { attribute: ElementAttribute; position: number } | null {
+  let pos = position;
+  pos = skipWhitespace(text, pos);
+  const { value: name, next } = readAttributeName(text, pos);
   pos = next;
 
   if (!name) {
     return null;
   }
 
-  skipWhitespace(text, () => pos++, () => pos);
+  pos = skipWhitespace(text, pos);
 
   // a boolean attribute: no "="
   if (text[pos] !== '=') {
@@ -907,7 +1012,7 @@ function parseAttribute(text: string, position: number): { attribute: ElementAtt
   }
 
   pos += 1;
-  skipWhitespace(text, () => pos++, () => pos);
+  pos = skipWhitespace(text, pos);
 
   let rawValue = '';
   let valueStart = pos;
@@ -921,35 +1026,20 @@ function parseAttribute(text: string, position: number): { attribute: ElementAtt
   } else {
     const start = pos;
     valueStart = start;
-    while (pos < text.length && text[pos] !== '>') {
-      if (startsTemplateTag(text, pos)) {
-        const token = parseMustacheToken(text, pos);
-        pos = token.end;
-        continue;
-      }
-
-      if (isSelfClosingSlash(text, pos)) {
-        break;
-      }
-
-      if (whitespace.test(text[pos])) {
-        break;
-      }
-
-      pos += 1;
-    }
+    pos = readUnquotedValueEnd(text, pos);
     rawValue = text.slice(start, pos);
+  }
 
-    /* Only an unquoted value can hold both quote characters - a quoted one would have ended at
-     * the first matching delimiter - and there is then no quote left to wrap it in. It used to
-     * come back as `title='a"b'c'`, which HTML reads as two attributes. */
-    if (rawValue.includes('"') && rawValue.includes("'")) {
-      fail('unquoted attribute value cannot contain both quote characters', start, pos);
-    }
+  /* A value holding both quote characters cannot be printed: whichever one the printer wraps it
+   * in ends the attribute early: `title=a"b'c` would print as `title='a"b'c'`, which HTML reads
+   * as two attributes. The reader skips over mustaches to find the closing quote, so it accepts
+   * values like `class="{{t 'a' "b"}}"` that a browser would cut short. */
+  if (rawValue.includes('"') && rawValue.includes("'")) {
+    fail('attribute value cannot contain both quote characters', rangeOffset + valueStart, rangeOffset + pos);
   }
 
 
-  return { attribute: createAttribute(name, rawValue, valueStart), position: pos };
+  return { attribute: createAttribute(name, rawValue, rangeOffset + valueStart), position: pos };
 }
 
 
@@ -958,7 +1048,7 @@ function parseDynamicAttribute(
   position: number,
 ): { attribute: ElementAttribute; position: number } | null {
   let pos = position;
-  skipWhitespace(text, () => pos++, () => pos);
+  pos = skipWhitespace(text, pos);
 
   const start = pos;
   let hasDynamicPart = false;
@@ -967,6 +1057,21 @@ function parseDynamicAttribute(
   while (pos < text.length) {
     if (startsTemplateTag(text, pos)) {
       const token = parseMustacheToken(text, pos);
+
+      /* A block in the middle of a name is part of the name, so it is consumed whole rather
+       * than refused. Unbalanced it is not a name at all, and the caller's error is better
+       * than a guess at where it ends. */
+      if (token.kind === 'blockStart') {
+        const blockEnd = findMatchingBlockEnd(text, token);
+
+        if (blockEnd === null) {
+          return null;
+        }
+
+        hasDynamicPart = true;
+        pos = blockEnd;
+        continue;
+      }
 
       if (token.kind !== 'mustache') {
         return null;
@@ -977,7 +1082,7 @@ function parseDynamicAttribute(
       continue;
     }
 
-    if (/[A-Za-z0-9_:-]/.test(text[pos])) {
+    if (attributeNameCharacter.test(text[pos])) {
       hasStaticPart = true;
       pos += 1;
       continue;
@@ -986,46 +1091,38 @@ function parseDynamicAttribute(
     break;
   }
 
-  if (!hasDynamicPart || !hasStaticPart) {
+  if (!hasDynamicPart) {
     return null;
   }
 
   const nameEnd = pos;
-  let afterName = pos;
-  while (afterName < text.length && whitespace.test(text[afterName])) {
-    afterName += 1;
-  }
+  const afterName = skipWhitespace(text, pos);
 
   if (text[afterName] !== '=') {
+    /* A static part is what makes this a name with a mustache in it rather than a mustache
+     * standing alone. Without one the caller's model is the better fit - `{{attrs}}` is an
+     * `AttributeMustache` and `{{#if a}}class="x"{{/if}}` an `AttributeBlock` wrapping whole
+     * attributes, whose body is worth formatting - so hand it back. */
+    if (!hasStaticPart) {
+      return null;
+    }
+
     return {
       attribute: createRawAttribute(text.slice(start, nameEnd)),
       position: nameEnd,
     };
   }
 
-  pos = afterName + 1;
-  while (pos < text.length && whitespace.test(text[pos])) {
-    pos += 1;
-  }
+  /* A value overrides that: it attaches to the composite name, and once the name is split
+   * there is nothing left to attach it to. */
+  pos = skipWhitespace(text, afterName + 1);
 
   if (text[pos] === '"' || text[pos] === "'") {
     const quote = text[pos];
     pos += 1;
     pos = readQuotedAttributeValue(text, pos, quote).position;
   } else {
-    while (pos < text.length && !whitespace.test(text[pos]) && text[pos] !== '>') {
-      if (isSelfClosingSlash(text, pos)) {
-        break;
-      }
-
-      if (startsTemplateTag(text, pos)) {
-        const token = parseMustacheToken(text, pos);
-        pos = token.end;
-        continue;
-      }
-
-      pos += 1;
-    }
+    pos = readUnquotedValueEnd(text, pos);
   }
 
   return {
@@ -1043,17 +1140,17 @@ function createAttribute(name: string, rawValue: string | null, valueStart?: num
     };
   }
 
-  const parts = parseAttributeValueParts(rawValue, valueStart ?? 0);
+  const value: AttributeValue = {
+    type: 'AttributeValue',
+    parts: parseAttributeValueParts(rawValue, valueStart ?? 0),
+    raw: rawValue,
+  };
 
   return {
     type: 'Attribute',
     name,
     value: withOptionalRange(
-      {
-        type: 'AttributeValue' as const,
-        parts,
-        raw: rawValue,
-      },
+      value,
       valueStart,
       typeof valueStart === 'number' ? valueStart + rawValue.length : undefined,
     ),
@@ -1070,77 +1167,45 @@ function createRawAttribute(raw: string): ElementAttribute {
 function parseAttributeValueParts(
   value: string,
   rangeOffset = 0,
-): (TextNode | MustacheStatement | BlockStatement | PartialStatement | DecoratorStatement | CommentStatement)[] {
-  const parts: (TextNode | MustacheStatement | BlockStatement | PartialStatement | DecoratorStatement | CommentStatement)[] = [];
+): AttributeValuePart[] {
+  const parts: AttributeValuePart[] = [];
   let pos = 0;
 
   while (pos < value.length) {
+    /* A raw block's body is emitted literally by Handlebars, so it is copied through here for
+     * the same reason it is between siblings: reformatting the `{{ x }}` inside one changes
+     * what the value renders. Only the sibling list guarded this. */
+    const rawBlockEnd = consumeTerminatedRawBlock(value, pos, rangeOffset);
+    if (rawBlockEnd !== null) {
+      parts.push(
+        withRange({ type: 'TextNode', chars: value.slice(pos, rawBlockEnd) }, rangeOffset + pos, rangeOffset + rawBlockEnd),
+      );
+      pos = rawBlockEnd;
+      continue;
+    }
+
     if (startsTemplateTag(value, pos)) {
       const token = parseMustacheToken(value, pos);
 
-      // a comment
-      if (token.kind === 'comment') {
-        parts.push(createComment(token.rawContent, rangeOffset + pos, rangeOffset + token.end));
+      const statement = createStatement(value, token, pos, rangeOffset);
+      if (statement) {
+        parts.push(statement);
         pos = token.end;
         continue;
       }
 
-      // partial
-      if (token.kind === 'partial') {
-        parts.push(createPartial(token.content, token.trimOpen, token.trimClose, rangeOffset + pos, rangeOffset + token.end, rangeOffset + contentOffset(value, pos, token.end, token.content)));
-        pos = token.end;
-        continue;
-      }
-
-      if (token.specialForm === 'decorator') {
-        parts.push(
-          createDecorator(
-            token.content.slice(1).trim(),
-            token.trimOpen,
-            token.trimClose,
-            rangeOffset + pos,
-            rangeOffset + token.end,
-            rangeOffset + contentOffset(value, pos, token.end, token.content.slice(1).trim()),
-          ),
-        );
-        pos = token.end;
-        continue;
-      }
-
-      // a plain mustache
-      if (token.kind === 'mustache') {
-        parts.push(
-          createMustache(token.content, token.triple, token.trimOpen, token.trimClose, rangeOffset + pos, rangeOffset + token.end, rangeOffset + contentOffset(value, pos, token.end, token.content)),
-        );
-        pos = token.end;
-        continue;
-      }
-
-      // a block, {{#if ...}} ... {{/if}}
-      if (token.kind === 'blockStart') {
-        if (!hasMatchingBlockEnd(value, token, pos)) {
-          // no close found, so keep it as text rather than fail
-          parts.push(
-            withRange(
-              { type: 'TextNode', chars: value.slice(pos, token.end) } as TextNode,
-              rangeOffset + pos,
-              rangeOffset + token.end,
-            ),
-          );
-          pos = token.end;
-          continue;
-        }
-
+      if (token.kind === 'blockStart' && hasMatchingBlockEnd(value, token)) {
         const { node, next } = parseBlock(value, token, rangeOffset);
         parts.push(node);
         pos = next;
         continue;
       }
 
-      // else / blockEnd: odd, but not worth failing over
+      /* A value is a string, so the recovery here keeps the source as text rather than as a
+       * node - unlike attribute position, where an unreadable token stays a mustache. */
       parts.push(
         withRange(
-          { type: 'TextNode', chars: value.slice(pos, token.end) } as TextNode,
+          { type: 'TextNode', chars: value.slice(pos, token.end) },
           rangeOffset + pos,
           rangeOffset + token.end,
         ),
@@ -1154,7 +1219,7 @@ function parseAttributeValueParts(
     const rawText = value.slice(pos, end);
 
     if (rawText.length > 0) {
-      parts.push(withRange({ type: 'TextNode', chars: rawText } as TextNode, rangeOffset + pos, rangeOffset + end));
+      parts.push(withRange({ type: 'TextNode', chars: rawText }, rangeOffset + pos, rangeOffset + end));
     }
 
     pos = end;
@@ -1179,7 +1244,10 @@ function preserveValueWhitespace(nodes: Node[]): void {
       (node.inverseChain ?? []).forEach((branch) => preserveValueWhitespace(branch.program.body));
       preserveValueWhitespace(node.inverse.body);
     } else if (node.type === 'ElementNode') {
+      node.preserveWhitespace = true;
       preserveValueWhitespace(node.children);
+    } else if (node.type === 'UnmatchedNode') {
+      node.preserveWhitespace = true;
     }
   }
 }
@@ -1208,10 +1276,35 @@ function readQuotedAttributeValue(
   return { value: text.slice(position), position: text.length };
 }
 
-function skipWhitespace(text: string, advance: () => void, getPos: () => number) {
-  while (getPos() < text.length && whitespace.test(text[getPos()])) {
-    advance();
+/* One past the whitespace run starting at `position`. Every caller wants an index, and taking
+ * one instead of a pair of closures is what let the open-coded copies of this loop go. */
+function skipWhitespace(text: string, position: number): number {
+  let pos = position;
+
+  while (pos < text.length && whitespace.html.test(text[pos])) {
+    pos += 1;
   }
+
+  return pos;
+}
+
+/**
+ * HTML's attribute-name state ends at whitespace, `/`, `>` or `=`, and nowhere else.
+ *
+ * Matching a tag-name charset instead stepped over one character and carried on: `@click` came
+ * back as `click` and `(click)="go()"` as two boolean attributes, value gone, silently.
+ */
+/* Stops at a mustache as well as at the characters HTML ends a name on. `parseDynamicAttribute`
+ * has already had its go by the time this runs, so what is left is a block or a partial glued to
+ * the name - `<div data-{{#if a}}x{{/if}}>`. Reading `data-{{#if` as the name desynchronised the
+ * tag loop, which then reported the `/` of `{{/if}}` as an unexpected character. Left here, the
+ * tag loop takes the block as its own glued attribute and the two print back together. */
+function readAttributeName(text: string, position: number): { value: string; next: number } {
+  let pos = position;
+  while (pos < text.length && attributeNameCharacter.test(text[pos]) && !startsTemplateTag(text, pos)) {
+    pos += 1;
+  }
+  return { value: text.slice(position, pos), next: pos };
 }
 
 function readName(text: string, position: number): { value: string; next: number } {
@@ -1258,34 +1351,35 @@ function findNextMarkup(text: string, position: number): number {
 
 function findCurrentBlockBoundary(text: string, position: number, endBlock: string): number {
   let depth = 0;
-  let pos = position;
 
-  while (pos < text.length) {
-    const next = findNextHandlebarsOpen(text, pos);
-    if (next === -1) {
-      return -1;
-    }
-
-    const token = parseMustacheToken(text, next);
-
+  for (const token of mustachesFrom(text, position)) {
     if (token.kind === 'blockStart') {
       depth += 1;
     } else if (token.kind === 'blockEnd') {
       if (depth === 0 && token.name === endBlock) {
-        return next;
+        return token.start;
       }
 
       if (depth > 0) {
         depth -= 1;
       }
     } else if (token.kind === 'else' && depth === 0) {
-      return next;
+      return token.start;
     }
-
-    pos = token.end > next ? token.end : next + 2;
   }
 
   return -1;
+}
+
+/* Past one mustache, or past a whole raw block: a raw block's body is emitted literally, so the
+ * markup inside it is not markup either. Never returns `position`, so callers cannot spin. */
+function skipMustache(text: string, position: number): number {
+  const rawBlockEnd = consumeRawBlock(text, position);
+  if (rawBlockEnd !== null && rawBlockEnd > position) {
+    return rawBlockEnd;
+  }
+
+  return Math.max(parseMustacheToken(text, position).end, position + 2);
 }
 
 function findMatchingTagClose(text: string, tag: string, position: number, limit = -1): number | null {
@@ -1305,6 +1399,15 @@ function findMatchingTagClose(text: string, tag: string, position: number, limit
     const next = text.indexOf('<', pos);
     if (next === -1 || (limit >= 0 && next >= limit)) {
       return null;
+    }
+
+    /* A `<` inside a mustache is not markup, so the dialect is consulted first, as every other
+     * scanner here does. Otherwise `{{t "<div>"}}` reads as an open tag, leaving the scan a level
+     * too deep and the real `</div>` closing it - refusing the file as unclosed. */
+    const mustache = findNextHandlebarsOpen(text, pos);
+    if (mustache !== -1 && mustache < next) {
+      pos = skipMustache(text, mustache);
+      continue;
     }
 
     if (text.startsWith('<!--', next)) {
@@ -1330,10 +1433,10 @@ function findMatchingTagClose(text: string, tag: string, position: number, limit
       continue;
     }
 
-    const tagResult = parseTag(text, next);
+    const tagResult = scanTag(text, next);
 
     if (tagResult.kind === 'close') {
-      if (tagResult.tag === tag) {
+      if (sameTag(tagResult.tag, tag)) {
         if (depth === 0) {
           return next;
         }
@@ -1352,7 +1455,7 @@ function findMatchingTagClose(text: string, tag: string, position: number, limit
       continue;
     }
 
-    if (tagResult.kind === 'open' && tagResult.tag === tag) {
+    if (tagResult.kind === 'open' && sameTag(tagResult.tag, tag)) {
       depth += 1;
     }
 
@@ -1362,25 +1465,23 @@ function findMatchingTagClose(text: string, tag: string, position: number, limit
   return null;
 }
 
-function shouldPreserveMustacheVerbatim(token: MustacheToken): boolean {
-  return templateDialect.shouldPreserveTokenVerbatim(token);
-}
-
 /**
  * Raw text ends at the first `</tag`, whatever it appears to sit inside.
  *
  * A browser's tokenizer does not parse the script or style body looking for string literals -
- * that is exactly why `"<\\/script>"` has to be escaped in JS. Tracking quotes here instead made
- * an apostrophe in a comment hide the closing tag.
+ * that is exactly why `"<\\/script>"` has to be escaped in JS. Tracking quotes here instead would
+ * let an apostrophe in a comment hide the closing tag.
  */
 function findRawTextClose(text: string, position: number, tag: string): number {
   const needle = `</${tag.toLowerCase()}`;
+  /* The name has to end there: HTML's script-data end-tag state needs whitespace, `/` or `>`
+   * after it, so `"</scriptx>"` inside a script body does not close the element. */
 
   /* Scanning case-insensitively rather than lowercasing the whole template: this runs once per
    * raw-text element and again inside every close-tag scan, so a copy of the file each time
    * turns a page of `<script>`s into quadratic work. */
   for (let index = text.indexOf('<', position); index !== -1; index = text.indexOf('<', index + 1)) {
-    if (text.slice(index, index + needle.length).toLowerCase() === needle) {
+    if (text.slice(index, index + needle.length).toLowerCase() === needle && tagNameTerminator.test(text[index + needle.length] ?? '>')) {
       return index;
     }
   }
@@ -1388,42 +1489,23 @@ function findRawTextClose(text: string, position: number, tag: string): number {
   return -1;
 }
 
+/** Whether the character before `index`, whitespace aside, is `=`. */
+function follows(text: string, index: number, char: string): boolean {
+  let at = index - 1;
+  while (at >= 0 && whitespace.html.test(text[at])) at -= 1;
+
+  return text[at] === char;
+}
+
 function consumeTagLikeChunk(text: string, position: number): number {
-  let quote: '"' | "'" | '`' | null = null;
-  let escaped = false;
+  /* Same rule as a real tag head: a quote delimits a value only after `=`. `<{{t}} a=it's>`
+   * otherwise runs to EOF and swallows the rest of the file into one verbatim node. */
+  const end = scanPastQuotes(text, position + 1, {
+    stopsAt: (index) => text[index] === '>',
+    opensQuote: (index) => follows(text, index, '='),
+  });
 
-  for (let index = position + 1; index < text.length; index += 1) {
-    const char = text[index];
-
-    if (quote) {
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-
-      if (char === '\\') {
-        escaped = true;
-        continue;
-      }
-
-      if (char === quote) {
-        quote = null;
-      }
-
-      continue;
-    }
-
-    if (char === '"' || char === "'" || char === '`') {
-      quote = char;
-      continue;
-    }
-
-    if (char === '>') {
-      return index + 1;
-    }
-  }
-
-  return text.length;
+  return end === -1 ? text.length : end + 1;
 }
 
 function consumeDynamicElement(text: string, position: number): number | null {
@@ -1431,8 +1513,8 @@ function consumeDynamicElement(text: string, position: number): number | null {
     return null;
   }
 
-  const dynamicOpen = `<${templateDialect.openDelimiter}`;
-  const dynamicClose = `</${templateDialect.openDelimiter}`;
+  const dynamicOpen = `<${openDelimiter}`;
+  const dynamicClose = `</${openDelimiter}`;
 
   if (text.startsWith(dynamicClose, position)) {
     return consumeTagLikeChunk(text, position);
@@ -1475,87 +1557,116 @@ function contentOffset(text: string, tagStart: number, tagEnd: number, content: 
   return at === -1 ? tagStart : tagStart + at;
 }
 
-function parseExpression(content: string, contentStart = 0): MustacheStatement {
-  const expression = parseCall(content, contentStart);
+/* The parts every inline statement shares: its call, and the `~` markers on its delimiters. */
+function statementBase(text: string, token: MustacheToken, position: number, rangeOffset: number, content: string) {
   return {
-    type: 'MustacheStatement',
-    triple: false,
-    ...expression,
+    ...parseCall(content, rangeOffset + contentOffset(text, position, token.end, content)),
+    ...(token.trimOpen ? { trimOpen: true } : {}),
+    ...(token.trimClose ? { trimClose: true } : {}),
   };
 }
 
-function createMustache(
-  content: string,
-  triple: boolean,
-  trimOpen = false,
-  trimClose = false,
-  start?: number,
-  end?: number,
-  contentStart = 0,
-): MustacheStatement {
-  const expression = parseCall(content, contentStart);
+/**
+ * A mustache built from whatever token is in hand, whether or not it reads as one.
+ *
+ * The recovery paths use it for a block that never closes and for a stray `{{else}}` or
+ * `{{/if}}` in a position that cannot reject them.
+ */
+function createMustache(text: string, token: MustacheToken, position: number, rangeOffset: number): MustacheStatement {
+  /* Annotated, not inferred: `withOptionalRange` is generic, so an unannotated literal widens
+   * `type` to `string` and stops matching the node union. */
   const node: MustacheStatement = {
     type: 'MustacheStatement',
-    triple,
-    ...expression,
+    triple: token.triple,
+    ...statementBase(text, token, position, rangeOffset, token.content),
   };
 
-  if (trimOpen) {
-    node.trimOpen = true;
-  }
-
-  if (trimClose) {
-    node.trimClose = true;
-  }
-
-  return withOptionalRange(node, start, end);
+  return withOptionalRange(node, rangeOffset + position, rangeOffset + token.end);
 }
 
-function createPartial(content: string, trimOpen = false, trimClose = false, start?: number, end?: number, contentStart = 0): PartialStatement {
-  const expression = parseCall(content, contentStart);
-  const node: PartialStatement = {
-    type: 'PartialStatement',
-    ...expression,
-  };
+/**
+ * The node for a token that stands on its own, or null for the three kinds - a block and the two
+ * terminators - whose handling depends on where they appear.
+ *
+ * Every context that reads a mustache needs this dispatch: a program body, an attribute list,
+ * the inside of a value. Written out three times, they had drifted at the recovery arms.
+ */
+function createStatement(
+  text: string,
+  token: MustacheToken,
+  position: number,
+  rangeOffset: number,
+): MustacheStatement | PartialStatement | DecoratorStatement | CommentStatement | null {
+  const start = rangeOffset + position;
+  const end = rangeOffset + token.end;
 
-  if (trimOpen) {
-    node.trimOpen = true;
+  if (token.kind === 'comment') {
+    return createComment(token, start, end);
   }
 
-  if (trimClose) {
-    node.trimClose = true;
+  if (token.kind === 'partial') {
+    const node: PartialStatement = {
+      type: 'PartialStatement',
+      ...statementBase(text, token, position, rangeOffset, token.content),
+    };
+
+    return withOptionalRange(node, start, end);
   }
 
-  return withOptionalRange(node, start, end);
+  /* Before the mustache arm: a decorator is a mustache token carrying a `*`. */
+  if (token.specialForm === 'decorator') {
+    const node: DecoratorStatement = {
+      type: 'DecoratorStatement',
+      ...statementBase(text, token, position, rangeOffset, token.content.slice(1).trim()),
+    };
+
+    return withOptionalRange(node, start, end);
+  }
+
+  return token.kind === 'mustache' ? createMustache(text, token, position, rangeOffset) : null;
 }
 
-function createDecorator(content: string, trimOpen = false, trimClose = false, start?: number, end?: number, contentStart = 0): DecoratorStatement {
-  const expression = parseCall(content, contentStart);
-  const node: DecoratorStatement = {
-    type: 'DecoratorStatement',
-    ...expression,
-  };
+/**
+ * A comment's body, with the tag's own `~` markers taken off. They are whitespace control, not
+ * text: printing `rawContent` straight through emits them as body, turning `{{~! x ~}}` into
+ * `{{! ~! x ~ }}` and dropping the stripping the author asked for.
+ */
+function commentBody(token: MustacheToken): string {
+  let content = token.rawContent;
 
-  if (trimOpen) {
-    node.trimOpen = true;
+  if (token.trimOpen) {
+    content = content.replace(/^([\t ]*)~/u, '$1');
   }
 
-  if (trimClose) {
-    node.trimClose = true;
+  /* A block comment's closing `~` follows the `--`, so it never reached `rawContent`. */
+  if (token.trimClose) {
+    content = content.replace(/~([\t ]*)$/u, '$1');
   }
 
-  return withOptionalRange(node, start, end);
+  return content;
 }
 
-function createComment(content: string, start?: number, end?: number): CommentStatement {
+function createComment(token: MustacheToken, start?: number, end?: number): CommentStatement {
+  const content = commentBody(token);
   const isBlockStyle = /^\s*!-{2}/.test(content);
-  /* The tokenizer already stopped before the closing delimiter, so there is none to strip here;
-   * doing it anyway deleted a `--` the author wrote at the end of the body. */
-  const body = content.replace(/^[\t ]*!-{0,2}/, '');
-  const inline = !body.startsWith('\n');
-  let value = inline ? body.replace(/^\s*/, '') : body;
-
-  value = value.replace(/[ \t]+$/gm, '');
+  /* express-hbs' layout directive is `{{!< name}}`, with nothing between the `!` and the `<`, so
+   * the gap is what distinguishes it. Recognising it by body alone would print the ordinary
+   * comment `{{! < name}}` as a directive, silently wrapping the page in a layout. */
+  const isLayout = /^!<\s*\S/u.test(content.trim());
+  /* Only a block comment's `--` is a marker. Stripping up to two dashes regardless cannot tell
+   * it from a body that opens with one, which turns `{{!-foo}}` into `{{! foo }}`.
+   *
+   * Nothing is stripped from the end: the tokenizer stops before the closing delimiter already,
+   * so doing it again would delete a `--` the author wrote. */
+  const body = content.replace(isBlockStyle ? /^[\t ]*!--/u : /^[\t ]*!/u, '');
+  /* Trailing whitespace comes off first. A space between `{{!--` and the newline is invisible in
+   * the source and left the body not *starting* with one, which silently turned off the
+   * re-indent below - so `{{!-- \n  x\n--}}` and `{{!--\n  x\n--}}` printed differently. */
+  const trimmed = body.replace(/[ \t]+$/gm, '');
+  /* A body the author started on its own line keeps its leading newline; the printer reads that
+   * to decide whether to re-indent it. ASCII whitespace, not `\s`: a non-breaking space is
+   * content the author put there, and `\s` deleted one off the front of a comment body. */
+  const value = trimmed.startsWith('\n') ? trimmed : trimmed.replace(leadingWhitespace, '');
 
   const isMultiline = /\n/.test(content);
 
@@ -1564,6 +1675,8 @@ function createComment(content: string, start?: number, end?: number): CommentSt
     value,
     multiline: isMultiline,
     block: isBlockStyle || isMultiline,
-    inline,
+    ...(isLayout ? { layout: true } : {}),
+    ...(token.trimOpen ? { trimOpen: true } : {}),
+    ...(token.trimClose ? { trimClose: true } : {}),
   }, start, end);
 }

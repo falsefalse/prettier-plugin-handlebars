@@ -1,9 +1,21 @@
 import { isTemplateExpressionQuoteStart } from 'template-format-core';
+import { scanPastQuotes } from '../../scan';
+import * as whitespace from '../../whitespace';
 import type { TemplateBlockPrefix, TemplateToken } from 'template-format-core';
 
-/* Deliberately not typed `: TemplateDialect`. That interface demanded nine more members than the
- * parser and printer ever ask for, and every one of them was a second copy of Handlebars syntax
- * kept in step by hand - `getLineCommentTag` had already drifted from what `printComment` does. */
+export interface HandlebarsToken extends TemplateToken {
+  /**
+   * Whether the tokenizer found a closing delimiter, rather than running to the end of the
+   * input. Recorded by the one place that knows: re-deriving it by string-matching the token's
+   * tail reports true for any unterminated token running to a text end that already ends in
+   * `}}`, letting `{{foo "bar}}` past the malformed guard to print as `{{foo "bar}}}}`.
+   */
+  terminated: boolean;
+}
+
+/* Deliberately not typed `: TemplateDialect`. That interface demands nine more members than the
+ * parser and printer ever ask for, each a second copy of Handlebars syntax to keep in step by
+ * hand - `getLineCommentTag` and `printComment` disagree about the same thing. */
 export const handlebarsDialect = {
   openDelimiter: '{{',
   parseToken: parseHandlebarsToken,
@@ -19,20 +31,59 @@ export const handlebarsDialect = {
   shouldPreserveTokenVerbatim: shouldPreserveHandlebarsTokenVerbatim,
 };
 
-function parseHandlebarsToken(text: string, position: number): TemplateToken {
+/**
+ * The path a block opens on, which is where its name ends. A plain whitespace split cut
+ * `{{#[my block]}}` down to `[my`, and that never matched the `[my block]` the block's own
+ * `{{/[my block]}}` reports - a Handlebars path segment may hold spaces inside `[...]`.
+ */
+function readPathName(inner: string): string {
+  const text = inner.trim();
+  let brackets = false;
+
+  for (let pos = 0; pos < text.length; pos += 1) {
+    const char = text[pos];
+
+    if (char === '[') {
+      brackets = true;
+    } else if (char === ']') {
+      brackets = false;
+    } else if (!brackets && whitespace.handlebars.test(char)) {
+      return text.slice(0, pos);
+    }
+  }
+
+  return text;
+}
+
+function parseHandlebarsToken(text: string, position: number): HandlebarsToken {
   const triple = text.startsWith('{{{', position);
   const openLength = triple ? 3 : 2;
-  const isBlockComment = text.startsWith('{{!--', position) || text.startsWith('{{{!--', position);
   const close = triple ? '}}}' : '}}';
-  const closeDelimiter = isBlockComment ? `--${close}` : close;
+
+  const isBlockComment = isHandlebarsBlockComment(text, position);
+  const blockClose = isBlockComment ? findHandlebarsBlockCommentClose(text, position + openLength, close) : null;
+
+  /* A comment body is text, not an expression: Handlebars ends a line comment at the first close
+   * delimiter, full stop. The quote-aware scanner lets an unbalanced quote run the token past
+   * its real `}}`, so `{{! "q }}\n{{#if a}}y{{/if}}` swallows the block and renders nothing -
+   * stable across passes, and invisible to every gate. */
+  const isLineComment = !isBlockComment && /^~?!/u.test(text.slice(position + openLength, position + openLength + 2));
+
   const closeIdx = isBlockComment
-    ? text.indexOf(closeDelimiter, position + openLength)
-    : findHandlebarsClose(text, position + openLength, closeDelimiter);
-  const end = closeIdx >= 0 ? closeIdx + closeDelimiter.length : text.length;
+    ? blockClose?.index ?? -1
+    : isLineComment
+      ? text.indexOf(close, position + openLength)
+      : findHandlebarsClose(text, position + openLength, close);
+  const end = isBlockComment
+    ? blockClose?.end ?? text.length
+    : closeIdx >= 0
+      ? closeIdx + close.length
+      : text.length;
   const rawContent = text.slice(position + openLength, closeIdx >= 0 ? closeIdx : undefined);
   const rawInner = rawContent.trim();
   const trimOpen = rawInner.startsWith('~');
-  const trimClose = rawInner.endsWith('~');
+  /* A block comment's closing `~` sits after the `--`, so it is outside `rawContent`. */
+  const trimClose = blockClose ? blockClose.trimClose : rawInner.endsWith('~');
   const inner = rawInner.replace(/^~/, '').replace(/~$/, '').trim();
 
   const baseToken = {
@@ -43,6 +94,7 @@ function parseHandlebarsToken(text: string, position: number): TemplateToken {
     triple,
     trimOpen,
     trimClose,
+    terminated: isBlockComment ? blockClose !== null : closeIdx >= 0,
   };
 
   if (inner.startsWith('!')) {
@@ -54,17 +106,17 @@ function parseHandlebarsToken(text: string, position: number): TemplateToken {
   }
 
   if (inner.startsWith('<')) {
-    const name = inner.slice(1).trim().split(/\s+/)[0];
+    const name = readPathName(inner.slice(1));
     return { kind: 'blockStart', content: inner, name, specialForm: 'parent', ...baseToken };
   }
 
   if (inner.startsWith('#>')) {
-    const name = inner.slice(2).trim().split(/\s+/)[0];
+    const name = readPathName(inner.slice(2));
     return { kind: 'blockStart', content: inner, name, specialForm: 'blockPartial', ...baseToken };
   }
 
   if (inner.startsWith('#*')) {
-    const name = inner.slice(2).trim().split(/\s+/)[0];
+    const name = readPathName(inner.slice(2));
     return { kind: 'blockStart', content: inner, name, specialForm: 'decoratorBlock', ...baseToken };
   }
 
@@ -73,12 +125,12 @@ function parseHandlebarsToken(text: string, position: number): TemplateToken {
   }
 
   if (inner.startsWith('#')) {
-    const name = inner.slice(1).trim().split(/\s+/)[0];
+    const name = readPathName(inner.slice(1));
     return { kind: 'blockStart', content: inner, name, ...baseToken };
   }
 
   if (inner.startsWith('^')) {
-    const name = inner.slice(1).trim().split(/\s+/)[0];
+    const name = readPathName(inner.slice(1));
 
     /* Bare `{{^}}` is the shorthand for `{{else}}`; only `{{^name}}` opens an inverted block. */
     if (!name) {
@@ -89,7 +141,7 @@ function parseHandlebarsToken(text: string, position: number): TemplateToken {
   }
 
   if (inner.startsWith('$')) {
-    const name = inner.slice(1).trim().split(/\s+/)[0];
+    const name = readPathName(inner.slice(1));
     return { kind: 'blockStart', content: inner, name, specialForm: 'mustacheBlock', ...baseToken };
   }
 
@@ -111,42 +163,38 @@ function parseHandlebarsToken(text: string, position: number): TemplateToken {
   return { kind: 'mustache', content: inner, name: undefined, ...baseToken };
 }
 
-function findHandlebarsClose(text: string, position: number, closeDelimiter: string): number {
-  let quote: '"' | "'" | '`' | null = null;
-  let escaped = false;
+/**
+ * Whether a comment at `position` is written in block form. `{{~!-- x --~}}` is one as much as
+ * `{{!-- x --}}`, so the `~` is skipped: anchoring on a literal `{{!--` reads the
+ * whitespace-control form as a line comment and demotes it to `{{! !-- x -- }}`.
+ */
+export function isHandlebarsBlockComment(text: string, position: number): boolean {
+  const openLength = text.startsWith('{{{', position) ? 3 : 2;
 
-  for (let index = position; index < text.length; index += 1) {
-    const char = text[index];
+  return /^~?!--/u.test(text.slice(position + openLength, position + openLength + 4));
+}
 
-    if (quote) {
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
+/** The first `--}}` or `--~}}`, whichever comes first. */
+function findHandlebarsBlockCommentClose(
+  text: string,
+  position: number,
+  close: string,
+): { index: number; end: number; trimClose: boolean } | null {
+  const plain = text.indexOf(`--${close}`, position);
+  const trimmed = text.indexOf(`--~${close}`, position);
 
-      if (char === '\\') {
-        escaped = true;
-        continue;
-      }
-
-      if (char === quote) {
-        quote = null;
-      }
-
-      continue;
-    }
-
-    if ((char === '"' || char === "'" || char === '`') && isTemplateExpressionQuoteStart(text, index, position)) {
-      quote = char;
-      continue;
-    }
-
-    if (text.startsWith(closeDelimiter, index)) {
-      return index;
-    }
+  if (trimmed >= 0 && (plain < 0 || trimmed < plain)) {
+    return { index: trimmed, end: trimmed + close.length + 3, trimClose: true };
   }
 
-  return -1;
+  return plain < 0 ? null : { index: plain, end: plain + close.length + 2, trimClose: false };
+}
+
+function findHandlebarsClose(text: string, position: number, closeDelimiter: string): number {
+  return scanPastQuotes(text, position, {
+    stopsAt: (index) => text.startsWith(closeDelimiter, index),
+    opensQuote: (index) => isTemplateExpressionQuoteStart(text, index, position),
+  });
 }
 
 function isEscapedHandlebarsOpen(text: string, position: number): boolean {
@@ -185,6 +233,26 @@ function isDynamicHandlebarsElementStart(text: string, position: number): boolea
   return text.startsWith('<{{', position) || text.startsWith('</{{', position);
 }
 
+/**
+ * The name a raw block opens with, or `''` if `position` is not one. Tildes are tolerated on the
+ * open because the lexer takes them there; the closer below is stricter for the same reason.
+ */
+export function handlebarsRawBlockName(text: string, position: number, openEnd: number): string {
+  const inner = text.slice(position + 4, openEnd).trim().replace(/^~/u, '').replace(/~$/u, '').trim();
+
+  return inner.startsWith('/') ? '' : (inner.split(whitespace.handlebarsRun)[0] ?? '');
+}
+
+/**
+ * The only closer Handlebars accepts: no whitespace inside it and no tilde on either side -
+ * `{{{{~/raw}}}}` and `{{{{ / raw }}}}` are both lexical errors. One literal, so there is nothing
+ * to escape and nothing to drift - the two hand-written patterns this replaces disagreed about
+ * exactly that whitespace.
+ */
+export function handlebarsRawBlockCloser(name: string): string {
+  return `{{{{/${name}}}}}`;
+}
+
 function consumeHandlebarsRawBlock(text: string, position: number): number | null {
   if (!text.startsWith('{{{{', position)) {
     return null;
@@ -195,21 +263,19 @@ function consumeHandlebarsRawBlock(text: string, position: number): number | nul
     return text.length;
   }
 
-  const openInner = text.slice(position + 4, openIdx).trim().replace(/^~/, '').replace(/~$/, '').trim();
-  if (!openInner || openInner.startsWith('/')) {
+  const name = handlebarsRawBlockName(text, position, openIdx);
+  if (!name) {
     return null;
   }
 
-  const name = openInner.split(/\s+/)[0];
-  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const closePattern = new RegExp(`{{{{\\s*~?\\/\\s*${escapedName}\\s*~?\\s*}}}}`);
-  const closeMatch = closePattern.exec(text.slice(openIdx + 4));
+  const closer = handlebarsRawBlockCloser(name);
+  const closeIdx = text.indexOf(closer, openIdx + 4);
 
-  if (!closeMatch) {
+  if (closeIdx === -1) {
     return text.length;
   }
 
-  return openIdx + 4 + closeMatch.index + closeMatch[0].length;
+  return closeIdx + closer.length;
 }
 
 function getHandlebarsBlockExpression(token: TemplateToken): string {

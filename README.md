@@ -1,10 +1,10 @@
-# @poliklot/prettier-plugin-handlebars
+# @falsefalse/prettier-plugin-handlebars
 
 A Prettier plugin for classic Handlebars templates with mixed HTML markup.
 
-This is a personal fork. It is **opinionated**: it exposes no options of its own, only Prettier's
-core `printWidth`, `tabWidth`, `useTabs` and `singleQuote`. Everything else is a decision the
-formatter has already made.
+This started as a fork of another plugin — see [Prior work](#prior-work). It is **opinionated**:
+it exposes no options of its own, only Prettier's core `printWidth`, `tabWidth`, `useTabs` and
+`singleQuote`. Everything else is a decision the formatter has already made.
 
 ## The rule everything follows
 
@@ -27,13 +27,13 @@ Two consequences worth stating plainly:
 ## Install
 
 ```bash
-npm install --save-dev prettier <path-or-git-url-to-this-fork>
+npm install --save-dev prettier github:falsefalse/prettier-plugin-handlebars
 ```
 
 ```js
 /** @type {import("prettier").Config} */
 module.exports = {
-  plugins: ['@poliklot/prettier-plugin-handlebars'],
+  plugins: ['@falsefalse/prettier-plugin-handlebars'],
   overrides: [{ files: ['*.hbs', '*.handlebars'], options: { parser: 'handlebars' } }],
 };
 ```
@@ -56,7 +56,7 @@ skipped or handed to the HTML parser. See [docs/EDITOR_SETUP.md](./docs/EDITOR_S
 - subexpressions to any depth, broken by width all the way down
 - `prettier-ignore`, `prettier-ignore-start` / `-end`
 
-## Malformed input is rejected
+## Unclosed input is rejected
 
 Everything that opens must close. There is no recovery: a formatter that guesses at a missing
 `}}` prints markup the author did not write, and one that passes a mismatched tag through leaves
@@ -76,6 +76,12 @@ The error carries a source range, so editors can put the cursor on it.
 
 This includes the HTML spec's optional end tags: `<ul><li>a<li>b</ul>` is rejected. One rule with
 no list of exceptions beats a list of exceptions that has to be kept in step with the spec.
+
+What is checked is structure: delimiters balance, tags nest, a block matches its own closer —
+not Handlebars' expression grammar. `{{}}`, `{{{x}}}}` and `{{foo xa"y}}` are all
+delimiter-balanced, so they pass through unchanged for Handlebars itself to reject at compile
+time. The formatter does not make them worse, and it is not a second implementation of the
+language.
 
 ### When the markup only balances at render time
 
@@ -124,10 +130,20 @@ node scripts/run-property-gate.mjs --git ../your-repo --width 95 path/to/templat
 The last gate is a person reading the diff the formatter would produce. The property gates prove
 correctness; they cannot see bad taste, which is the failure mode that actually matters here.
 
-[REWRITE-PLAN.md](./REWRITE-PLAN.md) is the design record — why the printer looks like this, and
-what the previous one got wrong.
+[docs/REWRITE-PLAN.md](./docs/REWRITE-PLAN.md) is the design record — why the printer looks like
+this, and what the previous one got wrong.
+
+## Prior work
+
+This plugin began as a fork of
+[Poliklot/prettier-plugin-handlebars](https://github.com/Poliklot/prettier-plugin-handlebars),
+published as `@poliklot/prettier-plugin-handlebars` and MIT-licensed, © Poliklot. The parser and
+printer have since been rewritten — [docs/REWRITE-PLAN.md](./docs/REWRITE-PLAN.md) is that record
+— and the package now ships under its own name, but the shape of the project, a Handlebars-aware
+`.hbs` formatter with no options of its own, starts there.
 
 ## Docs
 
 - [Editor setup](./docs/EDITOR_SETUP.md)
 - [Troubleshooting](./docs/TROUBLESHOOTING.md)
+- [Printer rewrite plan](./docs/REWRITE-PLAN.md) — the design record

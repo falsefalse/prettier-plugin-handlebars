@@ -1,4 +1,4 @@
-/* The recurring corpus gate from REWRITE-PLAN.md section 7.
+/* The recurring corpus gate from docs/REWRITE-PLAN.md section 7.
  *
  * Reports formattable coverage plus the properties that hold over the formattable subset, so a
  * half-built printer that throws on unhandled nodes still produces a meaningful number.
@@ -13,14 +13,28 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import prettier from 'prettier';
-import { renderDifference } from './render.mjs';
+import { renderDifference } from '../test/lib/render.mts';
 import * as plugin from '../dist/plugin.js';
 
 const argv = process.argv.slice(2);
 const flag = (name) => argv.includes(name);
+const die = (message) => {
+  console.error(message);
+  process.exit(1);
+};
+
+/* A flag is not a value: `--git --width 90` would take `--width` as the repo path and reach
+ * execFileSync with it. Falling back is worse than throwing - it drops the git mode the caller
+ * asked for and reads an empty disk tree while exiting 0. */
 const valueOf = (name, fallback) => {
   const at = argv.indexOf(name);
-  return at === -1 ? fallback : argv[at + 1];
+  const value = at === -1 ? undefined : argv[at + 1];
+
+  if (at !== -1 && (value === undefined || value.startsWith('--'))) {
+    die(`${name} needs a value.`);
+  }
+
+  return value ?? fallback;
 };
 
 const printWidth = Number.parseInt(valueOf('--width', '80'), 10);
@@ -33,8 +47,7 @@ const positional = argv.filter((arg, index) => {
 });
 
 if (positional.length === 0) {
-  console.error('Usage: node scripts/run-property-gate.mjs [--git <repo>] <path> [more-paths...]');
-  process.exit(1);
+  die('Usage: node scripts/run-property-gate.mjs [--git <repo>] <path> [more-paths...]');
 }
 
 const templateExtensions = new Set(['.hbs', '.handlebars']);
@@ -83,7 +96,20 @@ function isUnbreakable(line, width) {
   return line.length - line.trimStart().length + longest > width;
 }
 
-const files = gitRepo ? collectFromGit(gitRepo, positional) : await collectFromDisk(positional);
+/* An unreadable path otherwise throws a raw fs stack, and one matching nothing prints
+ * `0/0 formattable` and exits 0 - a typo'd pathspec reading as a clean pass. Same vacuity
+ * the render property had: this gate cannot tell "checked nothing" from "checked everything and
+ * it was fine", so it has to refuse to report on nothing. */
+let files;
+try {
+  files = gitRepo ? collectFromGit(gitRepo, positional) : await collectFromDisk(positional);
+} catch (error) {
+  die(`cannot read ${positional.join(', ')}: ${error instanceof Error ? error.message : error}`);
+}
+
+if (files.length === 0) {
+  die(`no .hbs or .handlebars files under ${positional.join(', ')}${gitRepo ? ` in ${gitRepo}` : ''}.`);
+}
 const format = (source, filepath) =>
   prettier.format(source, { parser: 'handlebars', plugins: [plugin], filepath, printWidth });
 
@@ -93,6 +119,7 @@ const report = {
   unformattable: [],
   renderChanged: [],
   whitespaceChanged: [],
+  unrenderable: [],
   nonIdempotent: [],
   overWidth: [],
   overWidthExcused: 0,
@@ -115,7 +142,11 @@ for (const file of files) {
   /* Compiled with the real Handlebars runtime rather than approximated with regexes: the
    * approximation could not see whitespace control, standalone statements or broken quoting. */
   const difference = renderDifference(file.source, first);
-  if (difference) {
+  if (difference?.kind === 'unrenderable') {
+    /* Not a diff - a file this gate did not check. Bucketing it with the whitespace diffs would
+     * report a skipped file as a passing comparison. */
+    report.unrenderable.push(file.name);
+  } else if (difference) {
     const bucket = difference.kind === 'render' ? report.renderChanged : report.whitespaceChanged;
     bucket.push({ name: file.name, ...difference });
   }
@@ -133,7 +164,7 @@ if (asJson) {
 } else {
   const { total, formattable } = report;
   console.log(`coverage:        ${formattable}/${total} formattable`);
-  console.log(`renders:         ${report.renderChanged.length} changed`);
+  console.log(`renders:         ${report.renderChanged.length} changed, ${formattable - report.unrenderable.length}/${formattable} compared`);
   console.log(`whitespace:      ${report.whitespaceChanged.length} amount-only diffs`);
   console.log(`idempotence:     ${report.nonIdempotent.length} unstable`);
   console.log(`width (>${printWidth}):     ${report.overWidth.length} unexcused, ${report.overWidthExcused} unbreakable`);
@@ -153,4 +184,12 @@ if (asJson) {
       console.log(`  ${entry.name}:${entry.line} (${entry.length}) ${entry.text.slice(0, 70)}`);
     }
   }
+}
+
+/* A gate has to be able to fail. Coverage and the two tolerated buckets - a file the harness
+ * cannot render, a diff in the *amount* of whitespace - stay reportable numbers, but a template
+ * whose page changed or whose formatting will not settle is a property violation; exiting 0 on
+ * one makes every corpus run read as a pass. */
+if (report.renderChanged.length > 0 || report.nonIdempotent.length > 0) {
+  process.exit(1);
 }

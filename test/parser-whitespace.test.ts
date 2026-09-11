@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parse } from '../src/parser';
-import { findTilingViolations } from '../src/ast-invariants';
+// @ts-expect-error
+import { findTilingViolations } from './lib/ast-invariants.mts';
 import type { ElementNode, Node, TextNode } from '../src/types';
 
 function textChars(nodes: Node[]): Array<string | null> {
@@ -9,8 +10,12 @@ function textChars(nodes: Node[]): Array<string | null> {
 
 function onlyElement(source: string): ElementNode {
   const first = parse(source).body.find((node): node is ElementNode => node.type === 'ElementNode');
-  expect(first).toBeDefined();
-  return first as ElementNode;
+
+  if (!first) {
+    throw new Error(`no element in ${JSON.stringify(source)}`);
+  }
+
+  return first;
 }
 
 /* The printer decides what renders; the parser is not allowed to have an opinion. */
@@ -83,14 +88,28 @@ describe('tiling invariant', () => {
     '{{!-- note --}}\n<p>text</p>\n{{! short }}',
     '{{{{raw}}}}<div>{{ notParsed }}</div>{{{{/raw}}}}',
     '<input disabled type=text>',
+    '<Div><SPAN>y</span></dIV>',
+    '<img src=/a/b/>',
+    '<div @click="go" (tap)="t()" :bound="b" #ref data-x.y="1" v-bind:z="z"></div>',
+    '<div class="{{#if a}}<span title=\'{{x}}\'>y</span>{{/if}}">z</div>',
     '{{#> layout title=t}}<main>{{body}}</main>{{/layout}}',
     '<{{#if link}}a href="{{h}}"{{else}}div{{/if}}>{{label}}</{{#if link}}a{{else}}div{{/if}}>',
+    '<h{{level}}>Title</h{{level}}>',
+    '<div{{attrs}}>x</div\n>',
     '',
     '   ',
     '\n\n',
   ];
 
   it.each(shapes)('loses no source: %j', (source) => {
+    expect(findTilingViolations(parse(source), source)).toEqual([]);
+  });
+
+  /* An UnmatchedNode inside a value is built from the value slice; its range is the template's. */
+  it.each([
+    '<div class="{{#if a}}{{! prettier-ignore }}<b   >x</b>{{/if}}">y</div>',
+    '<div class="{{#if a}}{{{{raw}}}}<b>x</b>{{{{/raw}}}}{{/if}}">y</div>',
+  ])('offsets an unmatched node in a value against the template: %j', (source) => {
     expect(findTilingViolations(parse(source), source)).toEqual([]);
   });
 });

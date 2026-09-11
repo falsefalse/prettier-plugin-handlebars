@@ -25,19 +25,21 @@ export interface AttributeValue extends SourceRange {
   raw: string;
 }
 
-export type AttributeValuePart =
-  | TextNode
+/** Everything that can stand in attribute position, or inside a value alongside its text. */
+export type AttributeBlockNode =
   | MustacheStatement
   | BlockStatement
   | PartialStatement
   | DecoratorStatement
   | CommentStatement;
 
+export type AttributeValuePart = TextNode | AttributeBlockNode;
+
 /**
  * `glued` marks an attribute the author wrote with no space before it. For a mustache or block in
  * attribute position that space renders, so the printer may not invent one.
  */
-export type ElementAttribute = { glued?: boolean } & (
+export type ElementAttribute = SourceRange & { glued?: boolean } & (
   | {
       type: 'Attribute';
       name: string;
@@ -49,7 +51,7 @@ export type ElementAttribute = { glued?: boolean } & (
     }
   | {
       type: 'AttributeBlock';
-      block: MustacheStatement | BlockStatement | PartialStatement | DecoratorStatement | CommentStatement;
+      block: AttributeBlockNode;
     }
 );
 
@@ -59,6 +61,12 @@ export interface ElementNode extends SourceRange {
   attributes: ElementAttribute[];
   children: Node[];
   selfClosing: boolean;
+  /** As on `TextNode`: inside a value the printer may not break the tag, every character renders. */
+  preserveWhitespace?: boolean;
+  /** Set only when the author spelled the closing tag differently; HTML tag names ignore case. */
+  closeTag?: string;
+  /** Span between the tag name and the closing `>`, so the attributes can be checked to cover it. */
+  attributesRange?: [number, number];
   /** Span between the open tag's `>` and the close tag's `<`, so children can be checked to tile it. */
   contentRange?: [number, number];
 }
@@ -69,6 +77,7 @@ export interface TextNode extends SourceRange {
   chars: string;
   /** Content copied through untouched: raw-text elements, prettier-ignore regions. */
   verbatim?: boolean;
+  /** Inside an attribute value, where every space renders and none of them are the printer's. */
   preserveWhitespace?: boolean;
 }
 
@@ -112,7 +121,7 @@ export interface HashPair extends SourceRange {
   value: Expression;
 }
 
-export interface MustacheBase {
+interface MustacheBase {
   /** A SubExpression head is only reachable through a dynamic partial, `{{> (lookup . "n")}}`. */
   path: PathExpression | SubExpression;
   params: Expression[];
@@ -160,12 +169,17 @@ export interface CommentStatement extends SourceRange {
   value: string;
   multiline: boolean;
   block: boolean;
-  inline: boolean;
+  /** express-hbs' `{{!< name}}` layout directive, which must not be padded into prose. */
+  layout?: boolean;
+  trimOpen?: boolean;
+  trimClose?: boolean;
 }
 
 export interface UnmatchedNode extends SourceRange {
   type: 'UnmatchedNode';
   raw: string;
+  /** As on `TextNode`: in a value the trailing gap is content, not somewhere to break. */
+  preserveWhitespace?: boolean;
 }
 
 export type ParseEndReason = 'blockEnd' | 'else' | 'tagClose' | null;

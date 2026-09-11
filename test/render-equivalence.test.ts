@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import prettier from 'prettier';
 import * as plugin from '../src/plugin';
-import { renderDifference, renders } from '../scripts/render.mjs';
+// @ts-expect-error
+import { renderDifference, renders } from './lib/render.mts';
 
 async function format(source: string, printWidth = 80): Promise<string> {
   return prettier.format(source, { parser: 'handlebars', plugins: [plugin as never], printWidth });
@@ -46,8 +47,8 @@ describe('formatting does not change what a template renders', () => {
     expect(await format('one two three four five six', 10)).toBe('one two\nthree four\nfive six\n');
   });
 
-  /* Breaking an inline block puts its markers alone on their own lines, where Handlebars starts
-   * stripping whitespace that used to render. The whole block is an atom, body included. */
+  /* Breaking an inline block puts its markers alone on their own lines, where Handlebars strips
+   * whitespace that otherwise renders. The whole block is an atom, body included. */
   it.each([
     '{{#if ok~}} yes {{~else~}} no {{~/if}}',
     'x {{#if a}} some fairly long body text here {{/if}} y',
@@ -99,12 +100,27 @@ describe('formatting does not change what a template renders', () => {
 });
 
 /* The corpus gate reports whitespace-amount changes separately from content changes, and holds
- * both at zero. A metric that cannot fail is not a gate, so this pins that it can. */
-describe('the whitespace-amount canary has teeth', () => {
+ * both at zero. A metric that cannot fail is not a gate, and one that fails on what the printer
+ * does every day is not one either, so this pins both edges. */
+describe('the render gate tolerates the formatter and nothing else', () => {
   it.each([
     ['a newline that vanishes', '<p>a\nb</p>', '<p>a b</p>', 'whitespace'],
     ['whitespace that vanishes', '<p>a b</p>', '<p>ab</p>', 'render'],
+    ['a changed value', '<div a="1">t</div>', '<div a="2">t</div>', 'render'],
     ['indentation the browser drops', '<div>\n  <b>x</b>\n</div>', '<div>\n    <b>x</b>\n</div>', undefined],
+    ['requoting a single-quoted value', "<div a='2'>t</div>", '<div a="2">t</div>', undefined],
+    ['quoting a bare value', '<div a=2>t</div>', '<div a="2">t</div>', undefined],
+    ['dropping a void element\'s slash', '<br />', '<br>', undefined],
+    ['a value that must keep its quotes', '<div a=x"y>t</div>', '<div a=\'x"y\'>t</div>', undefined],
+    ['a slash that belongs to the value', '<img src=/a/b/>', '<img src="/a/b/">', undefined],
+    ['rejoining a tag broken across lines', '<div\n  a="1"\n  b="2"\n>t</div>', '<div a="1" b="2">t</div>', undefined],
+    ['a `>` inside a value', '<div a="x>y" b=1>t</div>', '<div a="x>y" b="1">t</div>', undefined],
+    /* The same rewrites applied to the whole document blinded the gate to prose: a page
+     * rendering `Set x='a'` compared equal to one rendering `Set x="a"`. */
+    ['quoting in prose', "<p>Set x='a'</p>", '<p>Set x="a"</p>', 'render'],
+    ['a slash in prose', '<p>a/>b</p>', '<p>a>b</p>', 'render'],
+    ['whitespace inside a value', '<div a="x\ny">t</div>', '<div a="x y">t</div>', 'render'],
+    ['a dropped attribute', '<div a="1" b="2">t</div>', '<div a="1">t</div>', 'render'],
   ])('%s', (_name, before, after, kind) => {
     expect(renderDifference(before, after)?.kind).toBe(kind);
   });
@@ -112,22 +128,50 @@ describe('the whitespace-amount canary has teeth', () => {
 
 /**
  * Known limitation, pinned so it is recorded rather than rediscovered. Handlebars strips the
- * newline after a standalone partial, which turns the *next* line's indentation into rendered
- * content. Indenting an element's children is the formatter's job, so the two collide.
+ * newline after any standalone statement - a partial, a comment, a block's own markers - which
+ * turns the *next* line's indentation into rendered content. Indenting an element's children is
+ * the formatter's job, so the two collide.
  *
  * It only fires when the formatter changes that indentation, which means only on input that is
  * not already at the formatter's fixpoint - never on a file it has been run over.
  */
-describe('known limitation: indentation after a standalone partial', () => {
-  it('shows up when un-indented children are indented for the first time', async () => {
-    const source = '<section>\n{{> p}}\n<b>x</b>\n</section>';
-
+describe('known limitation: indentation after a standalone statement', () => {
+  it.each([
+    ['a partial', '<section>\n{{> p}}\n<b>x</b>\n</section>'],
+    ['a comment', '<section>\n{{! c }}\n<b>x</b>\n</section>'],
+    ["a block's markers", '<section>\n{{#if a}}\n<i>y</i>\n{{/if}}\n<b>x</b>\n</section>'],
+    ['an inline decorator', '<section>\n{{#*inline "n"}}z{{/inline}}\n<b>x</b>\n</section>'],
+  ])('shows up when un-indented children are indented for the first time: %s', async (_name, source) => {
     expect(renderDifference(source, await format(source))).not.toBeNull();
   });
 
-  it('does not recur once the file is formatted', async () => {
-    const formatted = await format('<section>\n{{> p}}\n<b>x</b>\n</section>');
+  it.each([
+    ['a partial', '<section>\n{{> p}}\n<b>x</b>\n</section>'],
+    ['a comment', '<section>\n{{! c }}\n<b>x</b>\n</section>'],
+    ["a block's markers", '<section>\n{{#if a}}\n<i>y</i>\n{{/if}}\n<b>x</b>\n</section>'],
+    ['an inline decorator', '<section>\n{{#*inline "n"}}z{{/inline}}\n<b>x</b>\n</section>'],
+  ])('does not recur once the file is formatted: %s', async (_name, source) => {
+    const formatted = await format(source);
 
     expect(renderDifference(formatted, await format(formatted))).toBeNull();
+  });
+});
+
+/* A comment body is text, not an expression. Closing a line comment with the quote-aware
+ * scanner let an unbalanced quote run the token past its real `}}`, so whatever followed was
+ * pulled inside the comment - valid input, stable output, and the page rendered nothing. */
+describe('a quote in a comment body', () => {
+  it.each([
+    '{{! "q }}\n{{#if a}}y{{/if}}',
+    "{{! 'q }}\n{{#if a}}y{{/if}}",
+    '{{! `q }}\n{{#if a}}y{{/if}}',
+    '{{~! "q ~}}\n{{#if a}}y{{/if}}',
+    '{{!-- "q --}}\n{{#if a}}y{{/if}}',
+  ])('renders the same after formatting: %j', async (source) => {
+    await expectSameRender(source);
+  });
+
+  it('still closes a real mustache on a balanced quote spanning the delimiter', async () => {
+    await expectSameRender('{{foo "a}}b"}}');
   });
 });

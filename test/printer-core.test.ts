@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import prettier from 'prettier';
 import * as plugin from '../src/plugin';
+// @ts-expect-error
+import { renderDifference } from './lib/render.mts';
 
 async function format(source: string, printWidth = 80): Promise<string> {
   return prettier.format(source, { parser: 'handlebars', plugins: [plugin as never], printWidth });
@@ -88,6 +90,79 @@ describe('mustaches', () => {
   });
 });
 
+/* Three ways a verbatim region - a prettier-ignore fence, a dynamic element - broke the layout
+ * around it. All three needed a wider fuzz run than the default to show up, and all three were
+ * only visible on the second pass. */
+describe('content the printer must not touch', () => {
+  const REGION = '{{!-- prettier-ignore-start --}}\n<i>r</i>\n{{!-- prettier-ignore-end --}}';
+  const TAG = '<div aaa="1" bbb="2" ccc="3" ddd="4"></div>';
+
+  /* A hard space kept its neighbours in one `fill` item, so everything downstream of a
+   * standalone-sensitive statement was measured as a unit and never broke. */
+  it('breaks a long tag that follows a verbatim region', async () => {
+    const output = await format(`<p>x</p> ${REGION} {{#if o~}} y {{~/if}} ${TAG}`, 40);
+
+    /* Not a width assertion: the space either side of the region is hard, so the region's own
+     * lines take whatever width they take. What has to happen is the tag breaking on the first
+     * pass rather than the second. */
+    expect(output).toContain('<div\n  aaa="1"');
+    expect(await format(output, 40)).toBe(output);
+  });
+
+  /* `fits` stops at the first hard line and reports success, so an item holding one prints flat
+   * - over width - with the groups after that line never measured. */
+  it('measures the groups glued after a verbatim region', async () => {
+    const source = `${REGION}{{> (lookup . "partialName") data=this}}{{*log value level="debug"}}`;
+
+    expect(await format(source, 40)).toBe(await format(await format(source, 40), 40));
+  });
+
+  /* One level further out. The container's own closer was glued onto the last child, but the
+   * closer of *its* container was not, and `fill` measures its last item against an empty
+   * rest-stack - so the marker was invisible to the width check inside the child. */
+  it.each([
+    ['<ul><li>text here <img src="pic.png"></li></ul>', 28],
+    ['<div><p>hello there <span>world wide</span></p></div>', 30],
+    ['<div><ul><li>text here <img src="pic.png"></li></ul></div>', 28],
+  ])('counts an outer closing marker against the inner line: %j', async (source, width) => {
+    const output = await format(source, width);
+
+    expect(output.split('\n').filter((line) => line.length > width)).toEqual([]);
+    expect(await format(output, width)).toBe(output);
+  });
+
+  /* The region's text is opaque: this one opens with a comment, so wrapping the space before it
+   * made that comment standalone and Handlebars deleted the space from the page. */
+  it('keeps the space next to a region as a space', async () => {
+    const source = `<b>{{~ value ~}}    ${REGION}<i>x</i></b>`;
+
+    expect(renderDifference(source, await format(source, 40))).toBeNull();
+  });
+});
+
+/* `\s` matches U+00A0, which the rest of the printer goes out of its way never to treat as
+ * whitespace. Trimming on it deleted a non-breaking space off the end of a block comment's
+ * body, and reading one as the pad it already had left a line comment unpadded. */
+describe('a non-breaking space in a comment', () => {
+  it.each([
+    ['{{!--\n  body\u00A0\n--}}', '{{!--\n  body\u00A0\n--}}\n'],
+    ['{{! a\u00A0 }}', '{{! a\u00A0 }}\n'],
+    ['{{! a\u00A0}}', '{{! a\u00A0 }}\n'],
+    ['{{!-- a\u00A0--}}', '{{!-- a\u00A0 --}}\n'],
+  ])('keeps it and still pads: %j', async (source, expected) => {
+    const first = await format(source);
+    expect(first).toBe(expected);
+    expect(await format(first)).toBe(first);
+  });
+
+  it.each([
+    ['{{! a }}', '{{! a }}\n'],
+    ['{{!--a--}}', '{{!-- a --}}\n'],
+  ])('pads an ordinary space exactly as before: %j', async (source, expected) => {
+    expect(await format(source)).toBe(expected);
+  });
+});
+
 describe('comments', () => {
   it.each([
     ['{{! short }}', '{{! short }}\n'],
@@ -95,9 +170,45 @@ describe('comments', () => {
     ['{{!-- block --}}', '{{!-- block --}}\n'],
     ['{{!--block--}}', '{{!-- block --}}\n'],
     ['{{!}}', '{{!}}\n'],
-    ['{{!----}}', '{{!----}}\n'],
+    /* An empty block comment keeps its spacing: `{{!----}}` reads as a typo, and is what
+     * collapsing the padding writes over every `{{!-- --}}`. */
+    ['{{!-- --}}', '{{!-- --}}\n'],
+    ['{{!----}}', '{{!-- --}}\n'],
+    /* `!--` is the block marker; `!-` is a body that happens to open with a dash. */
+    ['{{!-foo}}', '{{! -foo }}\n'],
+    ['{{!--foo--}}', '{{!-- foo --}}\n'],
   ])('pads a single-line body: %j', async (source, expected) => {
     await expectStable(source, expected);
+  });
+
+  /* `~` is the tag's, not the body's: raw token content emits the markers as comment text, and
+   * a tokenizer anchored on the block form written without whitespace control demotes
+   * `{{~!-- x --~}}` to a line comment. */
+  it.each([
+    ['{{~! trimmed ~}}', '{{~! trimmed ~}}\n'],
+    ['{{~!-- trimmed --~}}', '{{~!-- trimmed --~}}\n'],
+    ['{{~! open only }}', '{{~! open only }}\n'],
+    ['{{!-- close only --~}}', '{{!-- close only --~}}\n'],
+    ['{{~!--\n  multi\n--~}}', '{{~!--\n  multi\n--~}}\n'],
+  ])('keeps whitespace control on a comment: %j', async (source, expected) => {
+    await expectStable(source, expected);
+  });
+
+  /* express-hbs matches `{{!<name}}` with nothing between the `!` and the `<`. Deciding from
+   * the stripped body instead cut both ways: `{{! <b> is prose}}` was printed back unpadded, and
+   * `{{! < layout}}` was turned into a directive the author never wrote. */
+  it.each([
+    ['{{!< layout}}', '{{!< layout}}\n'],
+    ['{{!<layout}}', '{{!<layout}}\n'],
+    ['{{! < layout}}', '{{! < layout }}\n'],
+    ['{{! <b> is prose}}', '{{! <b> is prose }}\n'],
+    ['{{!--< not a directive --}}', '{{!-- < not a directive --}}\n'],
+  ])('tells the express-hbs layout directive from prose: %j', async (source, expected) => {
+    await expectStable(source, expected);
+  });
+
+  it('still reads a directive through its whitespace control', async () => {
+    await expectStable('{{~! prettier-ignore ~}}\n<div    a=1>x</div>', '{{~! prettier-ignore ~}}\n<div    a=1>x</div>\n');
   });
 
   /* Padding regardless puts trailing whitespace on the opening line of a multi-line body,
@@ -153,9 +264,9 @@ describe('prose', () => {
   });
 
   /* The rule does not stop at node boundaries: a newline the author wrote inside a text run is
-   * the same newline as one between two nodes. Treating them differently made layout depend on
-   * where the parser happened to split, which is how attributes written one-per-line inside an
-   * attribute-position block came back joined. */
+   * the same newline as one between two nodes. Treating them differently makes layout depend on
+   * where the parser happened to split, joining attributes written one-per-line inside an
+   * attribute-position block. */
   it('keeps a newline inside a text run', async () => {
     await expectStable('<p>\n  First sentence.\n  Second sentence.\n</p>', '<p>\n  First sentence.\n  Second sentence.\n</p>\n');
   });

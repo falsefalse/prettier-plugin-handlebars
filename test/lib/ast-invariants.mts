@@ -1,10 +1,18 @@
-import type { Expression, Node, Program, SourceRange } from './types';
+import type { Expression, Node, Program, SourceRange } from '../../src/types';
+
+type ViolationKind =
+  | 'gap'
+  | 'overlap'
+  | 'missing-range'
+  | 'uncovered-head'
+  | 'uncovered-tail'
+  | 'escapes-call'
+  | 'out-of-order'
+  | 'lossy-close-tag';
 
 export interface TilingViolation {
-  kind: 'gap' | 'overlap' | 'missing-range' | 'uncovered-head' | 'uncovered-tail' | 'escapes-call' | 'out-of-order';
-  /** What kind of container has the broken child list. */
+  kind: ViolationKind;
   container: string;
-  /** Source span the violation covers, and the text sitting in it. */
   start: number;
   end: number;
   text: string;
@@ -14,6 +22,10 @@ interface ChildList {
   container: string;
   nodes: Array<Node | SourceRange>;
   span: [number, number] | undefined;
+  /** Whitespace between attributes is the formatter's, so only a gap holding more is a fault. */
+  whitespaceGaps?: boolean;
+  /** Attributes are not `Node`s; their contents reach `walk` through the lists below them. */
+  descend?: boolean;
 }
 
 function childListsOf(node: Node): ChildList[] {
@@ -24,6 +36,16 @@ function childListsOf(node: Node): ChildList[] {
     case 'ElementNode': {
       const lists: ChildList[] = [
         { container: 'ElementNode', nodes: node.children, span: node.contentRange },
+        /* The attribute list has to account for the whole tag head. Leaving it out lets
+         * `parseTag` step over a character it cannot read - turning `@click` into `click` -
+         * while this gate goes on reporting that every case tiles. */
+        {
+          container: `<${node.tag}> attributes`,
+          nodes: node.attributes,
+          span: node.attributesRange,
+          whitespaceGaps: true,
+          descend: false,
+        },
       ];
 
       for (const attribute of node.attributes) {
@@ -40,9 +62,7 @@ function childListsOf(node: Node): ChildList[] {
     }
 
     case 'BlockStatement': {
-      const lists: ChildList[] = [
-        { container: 'BlockStatement', nodes: node.program.body, span: node.program.range },
-      ];
+      const lists: ChildList[] = [{ container: 'BlockStatement', nodes: node.program.body, span: node.program.range }];
 
       for (const branch of node.inverseChain ?? []) {
         lists.push({ container: 'ElseBranch', nodes: branch.program.body, span: branch.program.range });
@@ -65,9 +85,9 @@ function childListsOf(node: Node): ChildList[] {
  * still have to sit inside it.
  */
 function childrenOf(node: Node): Node[] {
-  const children = childListsOf(node).flatMap((list) =>
-    list.nodes.flatMap((child) => ('type' in child ? [child] : [])),
-  );
+  const children = childListsOf(node)
+    .filter((list) => list.descend !== false)
+    .flatMap((list) => list.nodes.flatMap((child) => ('type' in child ? [child] : [])));
 
   if (node.type === 'ElementNode') {
     const blocks = node.attributes.flatMap((attribute) =>
@@ -87,6 +107,8 @@ function walk(node: Node, visit: (node: Node) => void): void {
   }
 }
 
+const withoutWhitespace = (text: string) => text.replace(/[\t\n\f\r ]/gu, '');
+
 /**
  * The parser must not drop source. Every child list has to tile its container's span with no
  * gaps and no overlaps, which is exactly what fails when whitespace-only runs are discarded.
@@ -94,16 +116,33 @@ function walk(node: Node, visit: (node: Node) => void): void {
 export function findTilingViolations(program: Program, source: string): TilingViolation[] {
   const violations: TilingViolation[] = [];
 
-  const record = (kind: TilingViolation['kind'], container: string, start: number, end: number) => {
+  const record = (kind: ViolationKind, container: string, start: number, end: number) => {
     violations.push({ kind, container, start, end, text: source.slice(start, end) });
   };
 
   walk(program, (node) => {
-    for (const { container, nodes, span } of childListsOf(node)) {
+    /* The close tag belongs to no child list, so nothing below covers it: `</h{{level}}>` can
+     * come back as `</h>` with every span still tiling perfectly.
+     *
+     * Whitespace comes out of both sides rather than being normalised the way the parser
+     * normalises it. Restating the parser's rule here would make the check agree with it by
+     * construction, so the two would drift together; what this has to catch is a character
+     * going missing, and only whitespace inside a close tag is the formatter's to move. */
+    if (node.type === 'ElementNode' && !node.selfClosing && node.contentRange && node.range) {
+      const [start, end] = [node.contentRange[1], node.range[1]];
+      const written = source.slice(start + 2, end - 1);
+
+      if (withoutWhitespace(written) !== withoutWhitespace(node.closeTag ?? node.tag)) {
+        record('lossy-close-tag', `<${node.tag}>`, start, end);
+      }
+    }
+
+    for (const { container, nodes, span, whitespaceGaps } of childListsOf(node)) {
       if (nodes.length === 0) {
         continue;
       }
 
+      const uncovered = (start: number, end: number) => !whitespaceGaps || source.slice(start, end).trim() !== '';
       let previousEnd = span?.[0];
 
       for (const child of nodes) {
@@ -115,7 +154,7 @@ export function findTilingViolations(program: Program, source: string): TilingVi
           continue;
         }
 
-        if (previousEnd !== undefined && range[0] > previousEnd) {
+        if (previousEnd !== undefined && range[0] > previousEnd && uncovered(previousEnd, range[0])) {
           record(previousEnd === span?.[0] ? 'uncovered-head' : 'gap', container, previousEnd, range[0]);
         } else if (previousEnd !== undefined && range[0] < previousEnd) {
           record('overlap', container, range[0], previousEnd);
@@ -125,7 +164,7 @@ export function findTilingViolations(program: Program, source: string): TilingVi
       }
 
       const spanEnd = span?.[1];
-      if (previousEnd !== undefined && spanEnd !== undefined && previousEnd < spanEnd) {
+      if (previousEnd !== undefined && spanEnd !== undefined && previousEnd < spanEnd && uncovered(previousEnd, spanEnd)) {
         record('uncovered-tail', container, previousEnd, spanEnd);
       }
     }
@@ -133,7 +172,6 @@ export function findTilingViolations(program: Program, source: string): TilingVi
 
   return violations;
 }
-
 
 interface CallLike {
   path: Expression;
@@ -166,11 +204,15 @@ function expressionsOf(call: CallLike): Expression[] {
 export function findExpressionViolations(program: Program, source: string): TilingViolation[] {
   const violations: TilingViolation[] = [];
 
-  const record = (kind: TilingViolation['kind'], container: string, start: number, end: number) => {
+  const record = (kind: ViolationKind, container: string, start: number, end: number) => {
     violations.push({ kind, container, start, end, text: source.slice(start, end) });
   };
 
-  const checkExpression = (expression: Expression, outer: [number, number] | undefined, container: string): void => {
+  const checkExpression = (
+    expression: Expression,
+    outer: [number, number] | undefined,
+    container: string,
+  ) => {
     const range = expression.range;
 
     if (!range) {
@@ -187,7 +229,7 @@ export function findExpressionViolations(program: Program, source: string): Tili
     }
   };
 
-  const checkParts = (call: CallLike, container: string): void => {
+  const checkParts = (call: CallLike, container: string) => {
     let previousEnd: number | undefined;
 
     for (const expression of expressionsOf(call)) {

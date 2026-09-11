@@ -21,7 +21,7 @@ function failure(source: string): TemplateSyntaxError {
 /**
  * A formatter that guesses at a missing delimiter prints markup the author did not write, and one
  * that passes a mismatched tag through leaves the rest of the file unformatted with nothing to
- * show for it. Every one of these used to do one or the other, silently.
+ * show for it. Each of these is a shape where doing either would be silent.
  */
 describe('malformed templates are rejected', () => {
   it.each([
@@ -31,12 +31,17 @@ describe('malformed templates are rejected', () => {
     ['crossed tags', '<div><span>x</div></span>', 'unexpected </div>: expected </span>'],
     ['void element closed', '<br></br>', '<br> is a void element and cannot be closed'],
     ['unterminated tag', '<div class="foo>x</div>', "unterminated tag: expected '>'"],
+    ['unquoted value holding both quotes', '<div title=a"b\'c>x</div>', 'cannot contain both quote characters'],
     [
-      'unquoted value holding both quotes',
-      '<div title=a"b\'c>x</div>',
-      'unquoted attribute value cannot contain both quote characters',
+      'quoted value holding both quotes',
+      '<div class="{{t \'a\' "b"}}"></div>',
+      'cannot contain both quote characters',
     ],
     ['unterminated close tag', '<div>x</div', "unterminated tag: expected '>'"],
+    /* The input running out mid-tag is the same fault whether or not the author left a space
+     * after the tag name; reading past the end reported it as `unexpected undefined`. */
+    ['tag head running out of input', '<div\n', "unterminated tag: expected '>'"],
+    ['tag head running out mid-attribute', '<div a=', "unterminated tag: expected '>'"],
     ['unclosed block', '{{#if a}}\n  x\n', 'unclosed block: expected {{/if}}'],
     ['mismatched block close', '{{#if a}}x{{/unless}}', 'unclosed block: expected {{/if}}'],
     ['stray block close', 'x\n{{/if}}', 'unexpected {{/if}}: no block is open'],
@@ -47,9 +52,17 @@ describe('malformed templates are rejected', () => {
     ['unclosed inline decorator', '{{#*inline "n"}}x', 'unclosed block: expected {{/inline}}'],
     ['unterminated raw block', '{{{{raw}}}}x', 'unterminated raw block: expected {{{{/raw}}}}'],
     ['mismatched raw block', '{{{{raw}}}}x{{{{/other}}}}', 'unterminated raw block: expected {{{{/raw}}}}'],
+    /* Handlebars' lexer takes `{{{{/raw}}}}` and nothing else - a tilde or a space inside the
+     * closer is an error there, so it is one here. Two hand-written patterns for this disagreed. */
+    ['tilde in a raw block closer', '{{{{raw}}}}x{{{{~/raw}}}}', 'unterminated raw block: expected {{{{/raw}}}}'],
+    ['spaces in a raw block closer', '{{{{raw}}}}x{{{{ / raw }}}}', 'unterminated raw block: expected {{{{/raw}}}}'],
     ['unterminated ignore region', '{{! prettier-ignore-start }}x', 'unterminated prettier-ignore region'],
     ['unterminated html comment', '<!-- x', "unterminated HTML comment: expected '-->'"],
     ['unterminated mustache', '{{foo', 'unterminated {{: expected }}'],
+    /* The tail happens to end in `}}`, which is how the old string-matching check reported this
+     * as terminated - and the printer then emitted `{{foo "bar}}}}`, inventing a delimiter. */
+    ['unterminated mustache holding a quote', '{{foo "bar}}', 'unterminated {{: expected }}'],
+    ['unterminated mustache after a valid one', '{{a}}{{b "c}}', 'unterminated {{: expected }}'],
     ['unterminated triple mustache', '{{{foo', 'unterminated {{{: expected }}}'],
     ['unterminated comment', '{{! x', 'unterminated {{!: expected }}'],
     ['unterminated block comment', '{{!-- x', 'unterminated {{!--: expected --}}'],
@@ -57,15 +70,89 @@ describe('malformed templates are rejected', () => {
     expect(failure(source).message).toContain(message);
   });
 
+  /* HTML's attribute-name state ends only at whitespace, `/`, `>` or `=`. Reading a narrower
+   * charset sent `parseTag` down a branch that stepped over the character and carried on, so
+   * the author's markup was quietly deleted rather than reported. */
+  it.each([
+    '<div @click="go">x</div>',
+    '<div (click)="go()">x</div>',
+    '<div data-x.y="1">x</div>',
+    '<div :bound="b" #ref v-bind:z="z">x</div>',
+    '<div class="a" %weird>x</div>',
+  ])('keeps every character of an unusual attribute name: %j', async (source) => {
+    expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] })).toBe(`${source}\n`);
+  });
+
+  it.each([
+    ['a value with no name', '<div ="x">y</div>', 'unexpected = in <div>'],
+    ['a bare quoted string', '<div "foo">y</div>', 'unexpected " in <div>'],
+    ['a stray slash', '<div / class=x>y</div>', 'unexpected / in <div>'],
+  ])('rejects %s rather than skipping the character', (_name, source, message) => {
+    expect(failure(source).message).toContain(message);
+  });
+
   /* One quote kind is fine - the printer wraps the value in the other one - and a quote inside a
    * mustache is a string literal, not a delimiter. Rejecting every quote flagged two valid
-   * corpus files. */
+   * corpus files. Both kinds together is the unprintable case, quoted or not: the value reader
+   * skips over mustaches to find the closing quote, so it accepts input a browser cuts short. */
   it.each([
     ['<div title=a"b>x</div>', '<div title=\'a"b\'>x</div>\n'],
     ["<div title=a'b>x</div>", '<div title="a\'b">x</div>\n'],
     ["<img accept={{mimefor 'x'}}>", '<img accept="{{mimefor \'x\'}}">\n'],
   ])('quotes an unquoted value that holds one quote kind: %j', async (source, expected) => {
     expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] })).toBe(expected);
+  });
+
+  /* The block scanner reads raw text looking for `{{/name}}`, so what it must and must not step
+   * over is decided by Handlebars, not by HTML. It does not parse a raw block's body, so a
+   * `{{#if}}` in there opens nothing - but it has never heard of an HTML comment or a script,
+   * and `{{#if a}}<!-- {{#if b}} -->{{/if}}` is a template it rejects outright. */
+  it.each([
+    ['a block opened inside a raw block', '{{#if a}}{{{{raw}}}}{{#if b}}{{{{/raw}}}}{{/if}}'],
+    ['a block closed inside a raw block', '{{#each xs}}{{{{raw}}}}{{/each}}{{{{/raw}}}}{{/each}}'],
+    ['an open delimiter in a string literal', '{{#if (eq a "{{")}}x{{/if}}'],
+    ['a close delimiter in a string literal', '{{#if (eq a "}}")}}x{{/if}}'],
+  ])('accepts %s', async (_name, source) => {
+    expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] })).toBe(`${source}\n`);
+  });
+
+  it.each([
+    ['an HTML comment', '{{#if a}}<!-- {{#if b}} -->{{/if}}'],
+    ['a script body', '{{#if a}}<script>var s = "{{#if b}}";</script>{{/if}}'],
+  ])('still refuses a block left open inside %s, as Handlebars does', (_name, source) => {
+    expect(failure(source).message).toContain('unclosed block');
+  });
+
+  /* Three shapes a browser accepts, so this must too. `/` only ends an unquoted value
+   * when it is `/>`... which it never is, because HTML's unquoted-value state ends at
+   * whitespace or `>` and nowhere else. Tag names ignore case. And raw text ends at `</tag`
+   * only when the name really ends there. */
+  it.each([
+    ['<img src=/a/b/>', '<img src="/a/b/">\n'],
+    ['<a href=/path/>t</a>', '<a href="/path/">t</a>\n'],
+    ['<DIV>x</div>', '<DIV>x</div>\n'],
+    ['<Div><SPAN>y</span></dIV>', '<Div><SPAN>y</span></dIV>\n'],
+    ['<script>var s = "</scriptx>";</script>', '<script>var s = "</scriptx>";</script>\n'],
+    ['<script>a</SCRIPT>', '<script>a</SCRIPT>\n'],
+  ])('accepts %j, as a browser does', async (source, expected) => {
+    expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] })).toBe(expected);
+  });
+
+  /* The close tag's name has to end where the open tag's does. Comparing only its first
+   * `tag.length` characters meant `</bdi>` closed a `<b>` and `di` was deleted from the source,
+   * so the error - if one came at all - pointed at the next, well-formed close tag. */
+  it.each([
+    ['<b>x</bdi></b>', 'unexpected </bdi>: expected </b>'],
+    ['<p>a</pre></p>', 'unexpected </pre>: expected </p>'],
+    ['<b>x</bdi>', 'unclosed tag: expected </b>'],
+  ])('reports the close tag the author actually wrote: %j', (source, message) => {
+    expect(failure(source).message).toContain(message);
+  });
+
+  /* `</script >` is a real end tag - whitespace after the name is allowed - so a script body
+   * holding one really does close the element early, in a browser too. */
+  it('still ends raw text at a close tag followed by whitespace', () => {
+    expect(failure('<script>var s = "</script >";</script>').message).toContain('unexpected </script>');
   });
 
   /* We close optional end tags in this house, so the HTML spec's implicit closes are errors too:
@@ -136,6 +223,21 @@ describe('the escape hatches still work', () => {
     ).resolves.toBe(`${source}\n`);
   });
 
+  /* Lookahead must not build real nodes: routing `findMatchingTagClose` and `consumeNextNode`
+   * through `parseTag` lets a region written precisely because its markup is unusual be rejected
+   * on the way past. Scanning cannot fail, which is the only way the promise holds. */
+  it.each([
+    ['a hash pair followed by a positional param', '<span {{f a=1 b}}></span>'],
+    ['an unquoted value holding both quotes', '<span title=a"b\'c></span>'],
+    ['a subexpression that never closes', '<span {{f (g a}}></span>'],
+  ])('does not parse an ignored region, so it cannot reject one: %s', async (_name, markup) => {
+    const source = `<div>\n{{!-- prettier-ignore-start --}}\n${markup}\n{{!-- prettier-ignore-end --}}\n</div>`;
+
+    await expect(
+      prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] }),
+    ).resolves.toContain(markup);
+  });
+
   /* Only the three directives that do something are directives. `prettier-ignore-attribute` was
    * recognised and then never consulted - `parseTag` has no idea it exists - so it silently
    * behaved as `prettier-ignore` and swallowed the whole next node instead of one attribute. */
@@ -151,8 +253,8 @@ describe('the escape hatches still work', () => {
   /* `{{! prettier-ignore }}` ignores *the next node*, so it needs to know where that node ends.
    * When the markup is malformed there is no such extent, and the directive is only a comment -
    * the region form is the escape hatch for markup that does not balance. Determining the extent
-   * by parsing instead is what used to let an ignored region swallow its container's `</div>`
-   * or `{{/if}}`, and let a directive meant to suppress formatting reject the file. */
+   * by parsing instead lets an ignored region swallow its container's `</div>` or `{{/if}}`,
+   * and lets a directive meant to suppress formatting reject the file. */
   it('does not apply to markup whose extent cannot be determined', () => {
     expect(() => parse('{{! prettier-ignore }}\n<div    a=1>x')).toThrow(/unclosed tag/u);
   });
@@ -197,9 +299,9 @@ describe('prettier surfaces the failure', () => {
 });
 
 /**
- * Rejection is only tolerable if it is rejecting the right things. Each of these was refused by
- * an earlier pass over a parser bug that recovery had been hiding: a template that is perfectly
- * valid used to come back as "unclosed", and the whole file failed to format.
+ * Rejection is only tolerable if it is rejecting the right things. Each of these is valid and
+ * must format: reporting one as "unclosed" fails the whole file over a parser bug that recovery
+ * would otherwise hide.
  */
 describe('valid templates that were once rejected', () => {
   it.each([

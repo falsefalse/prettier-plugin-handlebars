@@ -1,3 +1,5 @@
+import type { Call } from '../../src/types';
+
 /* Most parser tests care about *what* a call says, not how its parts are modelled. This flattens
  * every call node back to plain strings so those assertions stay readable; the structured shape
  * has its own suite in expression.test.ts. */
@@ -33,7 +35,16 @@ function flatten(node: any): any {
   return flattened;
 }
 
-/** The AST comes back the shape it went in; only calls change. */
-export function flattenCalls<T>(node: T): T {
+/** Every call's parts, as `flatten` leaves them. */
+type FlatCallParts = { path: string; params: string[]; hash: { key: string; value: string }[] };
+
+/** The tree with every call's parts replaced by their source text. */
+export type Flat<T> = T extends Call
+    ? Omit<{ [K in keyof T]: Flat<T[K]> }, keyof FlatCallParts> & FlatCallParts
+    : T extends object
+      ? { [K in keyof T]: Flat<T[K]> }
+      : T;
+
+export function flattenCalls<T>(node: T): Flat<T> {
   return flatten(node);
 }

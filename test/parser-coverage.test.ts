@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { locEnd, locStart, parse as parseTemplate } from '../src/parser';
-import { flattenCalls } from './call-shape';
+import { flattenCalls, type Flat } from './lib/call-shape';
 
 /* Calls read as strings here; expression.test.ts covers the node shape. */
 const parse = (source: string) => flattenCalls(parseTemplate(source));
@@ -17,7 +17,7 @@ import type {
   UnmatchedNode,
 } from '../src/types';
 
-function parseProgram(source: string): Program {
+function parseProgram(source: string): Flat<Program> {
   return parse(source);
 }
 
@@ -198,7 +198,7 @@ describe('simple parser coverage', () => {
     });
   });
 
-  /* Both of these used to come back as UnmatchedNode; syntax-errors.test.ts owns them now. */
+  /* Neither is an UnmatchedNode; syntax-errors.test.ts owns the refusal cases. */
   it('rejects a closing tag on a void element', () => {
     expect(() => parseTemplate('<br></br>')).toThrow(/void element/u);
   });

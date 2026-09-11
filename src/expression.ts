@@ -1,4 +1,6 @@
+import { withRange } from 'template-format-core';
 import { TemplateSyntaxError } from './errors';
+import * as whitespace from './whitespace';
 import type { Call, Expression, HashPair, Literal, LiteralType, PathExpression, SubExpression } from './types';
 
 const quoteCharacters = new Set(['"', "'", '`']);
@@ -43,7 +45,7 @@ class CallReader {
   }
 
   private skipWhitespace(): void {
-    while (!this.done && /\s/u.test(this.peek())) {
+    while (!this.done && whitespace.handlebars.test(this.peek())) {
       this.index += 1;
     }
   }
@@ -61,7 +63,7 @@ class CallReader {
     }
 
     this.index += match[0].length;
-    return match[1].trim().split(/\s+/u).filter(Boolean);
+    return match[1].trim().split(whitespace.handlebarsRun).filter(Boolean);
   }
 
   private skipQuoted(): void {
@@ -91,7 +93,7 @@ class CallReader {
 
       if (char === '[') brackets += 1;
       else if (char === ']') brackets = Math.max(brackets - 1, 0);
-      else if (brackets === 0 && (/\s/u.test(char) || char === ')' || char === '=')) break;
+      else if (brackets === 0 && (whitespace.handlebars.test(char) || char === ')' || char === '=')) break;
 
       this.index += 1;
     }
@@ -99,7 +101,9 @@ class CallReader {
 
   /** A leaf is its own source text and the span it came from; only the label differs. */
   private leaf(type: LiteralType | 'PathExpression', start: number): Literal | PathExpression {
-    return { type, source: this.source.slice(start, this.index), range: this.span(start, this.index) };
+    const node: Literal | PathExpression = { type, source: this.source.slice(start, this.index) };
+
+    return withRange(node, ...this.span(start, this.index));
   }
 
   private readSubExpression(): SubExpression {
@@ -117,14 +121,15 @@ class CallReader {
 
     this.index += 1;
 
-    return {
+    const node: SubExpression = {
       type: 'SubExpression',
       source: this.source.slice(start, this.index),
       path: inner.path,
       params: inner.params,
       hash: inner.hash,
-      range: this.span(start, this.index),
     };
+
+    return withRange(node, ...this.span(start, this.index));
   }
 
   private readValue(): Expression {
@@ -153,9 +158,13 @@ class CallReader {
   private readHead(): PathExpression | SubExpression {
     const value = this.readValue();
 
-    return value.type === 'SubExpression' || value.type === 'PathExpression'
-      ? value
-      : { type: 'PathExpression', source: value.source, range: value.range };
+    if (value.type === 'SubExpression' || value.type === 'PathExpression') {
+      return value;
+    }
+
+    const node: PathExpression = { type: 'PathExpression', source: value.source };
+
+    return value.range ? withRange(node, ...value.range) : node;
   }
 
   readCall(nested = false): Call {
@@ -190,7 +199,7 @@ class CallReader {
         this.index += 1;
         this.skipWhitespace();
         const pairValue = this.readValue();
-        hash.push({ key: value.source, value: pairValue, range: this.span(start, this.index) });
+        hash.push(withRange({ key: value.source, value: pairValue }, ...this.span(start, this.index)));
         continue;
       }
 
@@ -212,7 +221,9 @@ class CallReader {
   }
 
   private emptyPath(): PathExpression {
-    return { type: 'PathExpression', source: '', range: this.span(this.index, this.index) };
+    const node: PathExpression = { type: 'PathExpression', source: '' };
+
+    return withRange(node, ...this.span(this.index, this.index));
   }
 }
 

@@ -1,22 +1,25 @@
 import { describe, expect, it } from 'vitest';
 import { parse as parseTemplate } from '../src/parser';
-import { flattenCalls } from './call-shape';
+import { flattenCalls, type Flat } from './lib/call-shape';
+import { Node, Program } from '../src/types';
 
 /* Calls read as strings here; expression.test.ts covers the node shape. */
 const parse = (source: string) => flattenCalls(parseTemplate(source));
 
 /* The parser keeps every whitespace run, so a template written across lines starts with one.
  * These tests are about structure, not indentation. */
-const isWhitespace = (node) => node.type === 'TextNode' && node.chars.trim() === '';
-const significant = (nodes) => nodes.filter((node) => !isWhitespace(node));
+const isWhitespace = (node: Flat<Node>) => node.type === 'TextNode' && node.chars.trim() === '';
+const significant = (nodes: Flat<Node>[]) => nodes.filter((node) => !isWhitespace(node));
 
-function firstElement(ast) {
+function firstElement(ast: Flat<Program>) {
   expect(ast).toBeDefined();
   expect(ast.type).toBe('Program');
 
   const first = significant(ast.body)[0];
   expect(first).toBeDefined();
   expect(first.type).toBe('ElementNode');
+
+  expect.assert(first.type == 'ElementNode')
   return first;
 }
 
@@ -107,8 +110,9 @@ describe('Mustache in HTML attributes', () => {
       })
     });
 
+    expect.assert(attr.type == 'Attribute')
     // value.parts holds a MustacheStatement with path "text"
-    expect(attr.value.parts).toEqual(
+    expect(attr.value?.parts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: 'MustacheStatement',
@@ -138,7 +142,8 @@ describe('Mustache in HTML attributes', () => {
       })
     });
 
-    expect(attr.value.parts).toEqual(
+    expect.assert(attr.type == 'Attribute')
+    expect(attr.value?.parts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: 'MustacheStatement',
@@ -150,7 +155,7 @@ describe('Mustache in HTML attributes', () => {
 
   it('class with if block in value', () => {
     const input = `
-      <div 
+      <div
         class="
           {{#if class}}
             {{ class }}
@@ -175,8 +180,9 @@ describe('Mustache in HTML attributes', () => {
       })
     });
 
+    expect.assert(attr.type == 'Attribute')
     // parts holds a BlockStatement with path "if"
-    expect(attr.value.parts).toEqual(
+    expect(attr.value?.parts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: 'BlockStatement',
@@ -218,20 +224,20 @@ describe('Mustache in HTML attributes', () => {
     const classAttr = attributes.find(a => a.type === 'Attribute' && a.name === 'class');
     const dataAttr = attributes.find(a => a.type === 'Attribute' && a.name === 'data-a123');
     const eachBlock = attributes.find(a => a.type === 'AttributeBlock');
+    /* `block` is any call or a comment, and a comment has no path. */
     const ifEqualsBlock = attributes.find(
-      a =>
-        a.type === 'AttributeBlock' &&
-        (a.block as any)?.path === 'ifEquals'
+      a => a.type === 'AttributeBlock' && 'path' in a.block && a.block.path === 'ifEquals'
     );
 
-    expect(idAttr).toBeDefined();
-    expect(classAttr).toBeDefined();
-    expect(dataAttr).toBeDefined();
-    expect(eachBlock).toBeDefined();
-    expect(ifEqualsBlock).toBeDefined();
+    expect.assert.isOk(idAttr);
+    expect.assert.isOk(classAttr);
+    expect.assert.isOk(dataAttr);
+    expect.assert.isOk(eachBlock);
+    expect.assert.isOk(ifEqualsBlock);
 
+    expect.assert(idAttr.type == 'Attribute')
     // id: value.parts holds a BlockStatement 'if'
-    expect(idAttr.value.parts).toEqual(
+    expect(idAttr.value?.parts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: 'BlockStatement',
@@ -240,8 +246,9 @@ describe('Mustache in HTML attributes', () => {
       ])
     );
 
+    expect.assert(classAttr.type == 'Attribute')
     // class: "a123 a123--" + {{ modification }}
-    expect(classAttr.value.parts).toEqual(
+    expect(classAttr.value?.parts).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           type: 'TextNode'
@@ -253,8 +260,9 @@ describe('Mustache in HTML attributes', () => {
       ])
     );
 
+    expect.assert(dataAttr.type == 'Attribute')
     // data-a123: just the static value "value"
-    expect(dataAttr.value.parts).toEqual([
+    expect(dataAttr.value?.parts).toEqual([
       expect.objectContaining({
         type: 'TextNode',
         chars: 'value'
@@ -286,13 +294,15 @@ describe('Mustache blocks in children', () => {
       child =>
         child.type === 'BlockStatement' &&
         child.path === 'layout'
-    ) as any;
+    );
 
     expect(parent).toMatchObject({
       type: 'BlockStatement',
       path: 'layout',
       blockPrefix: '<'
     });
+
+    expect.assert(parent?.type == 'BlockStatement')
 
     expect(significant(parent.program.body)[0]).toMatchObject({
       type: 'BlockStatement',
@@ -322,7 +332,7 @@ describe('Mustache blocks in children', () => {
       child =>
         child.type === 'BlockStatement' &&
         child.path === 'theme_boost/drawer'
-    ) as any;
+    );
 
     expect(parent).toMatchObject({
       type: 'BlockStatement',
@@ -330,6 +340,7 @@ describe('Mustache blocks in children', () => {
       blockPrefix: '<'
     });
 
+    expect.assert(parent?.type == 'BlockStatement')
     expect(significant(parent.program.body)[0]).toMatchObject({
       type: 'BlockStatement',
       path: 'drawercontent',
@@ -389,7 +400,7 @@ describe('Mustache blocks in children', () => {
         child.path === 'if'
     );
 
-    expect(ifBlock).toBeDefined();
+    expect.assert(ifBlock?.type == 'BlockStatement');
     expect(ifBlock.program).toMatchObject({
       type: 'Program'
     });
@@ -416,7 +427,7 @@ describe('Mustache blocks in children', () => {
       child =>
         child.type === 'BlockStatement' &&
         child.path === 'if'
-    ) as any;
+    );
 
     expect(ifBlock).toMatchObject({
       type: 'BlockStatement',
@@ -438,6 +449,7 @@ describe('Mustache blocks in children', () => {
       inverse: expect.objectContaining({ type: 'Program' })
     });
 
+    expect.assert(ifBlock?.type == 'BlockStatement')
     expect(ifBlock.inverse.body.some(node => node.type === 'TextNode' && node.chars.includes('four'))).toBe(true);
   });
 
@@ -456,7 +468,7 @@ describe('Mustache blocks in children', () => {
       child =>
         child.type === 'BlockStatement' &&
         child.path === 'ifCompare'
-    ) as any;
+    );
 
     expect(ifCompareBlock).toMatchObject({
       path: 'ifCompare',
@@ -513,7 +525,7 @@ describe('Mustache blocks in children', () => {
         (a.block as any)?.path === 'each'
     );
 
-    expect(eachAttrBlock).toBeDefined();
+    expect.assert(eachAttrBlock?.type == 'AttributeBlock');
     expect(eachAttrBlock.block).toMatchObject({
       type: 'BlockStatement',
       blockParams: ['item'],

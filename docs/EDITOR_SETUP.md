@@ -26,7 +26,7 @@ Recommended Prettier config:
 ```js
 /** @type {import("prettier").Config} */
 module.exports = {
-  plugins: ['@poliklot/prettier-plugin-handlebars'],
+  plugins: ['@falsefalse/prettier-plugin-handlebars'],
   overrides: [
     {
       files: ["*.hbs", "*.handlebars"],
@@ -42,7 +42,7 @@ If VS Code still does not format files, open the Prettier output panel and check
 
 ## WebStorm / PhpStorm / other JetBrains IDEs
 
-1. Install `prettier` and `@poliklot/prettier-plugin-handlebars` in the project.
+1. Install `prettier` and `@falsefalse/prettier-plugin-handlebars` in the project.
 2. Open **Settings → Languages & Frameworks → JavaScript → Prettier**.
 3. Point **Prettier package** to the local `node_modules/prettier` package.
 4. Enable **Run on save** for `.hbs` / `.handlebars` if desired.
@@ -68,7 +68,7 @@ If your formatter does not pass `--stdin-filepath`, use explicit plugin and pars
 
 ```bash
 ./node_modules/.bin/prettier \
-  --plugin @poliklot/prettier-plugin-handlebars \
+  --plugin @falsefalse/prettier-plugin-handlebars \
   --parser handlebars
 ```
 

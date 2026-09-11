@@ -1,7 +1,8 @@
 import type { AstPath, Doc, ParserOptions, Printer } from 'prettier';
-import { builders } from 'prettier/doc';
+import { builders, utils } from 'prettier/doc';
 import { stripCommonIndent, voidElements } from 'template-format-core';
 import { handlebarsDialect as templateDialect } from './dialects/handlebars/tokens';
+import * as whitespace from './whitespace';
 import type {
   AttributeValue,
   BlockStatement,
@@ -14,17 +15,24 @@ import type {
   MustacheStatement,
   Node,
   PartialStatement,
+  Program,
   TextNode,
   UnmatchedNode,
 } from './types';
 
 const { dedent, fill, group, hardline, ifBreak, indent, join, line, literalline, softline } = builders;
+const { removeLines } = utils;
 
-/* A run of blank lines collapses to one: two hardlines, never more. */
-const MAX_CONSECUTIVE_NEWLINES = 2;
+/* A run of blank lines collapses to one, which is two hardlines. */
+const MAX_HARDLINES = 2;
 
 /** Only prettier's core options reach the printer; this formatter is opinionated. */
-export type PrintOptions = Pick<ParserOptions<Node>, 'printWidth' | 'tabWidth' | 'useTabs' | 'singleQuote'>;
+/* Only what the printer actually reads. Width and indentation are the doc printer's business,
+ * not ours - listing them here just invited code that reached for them directly. */
+export type PrintOptions = Pick<ParserOptions<Node>, 'singleQuote'> & {
+  /** Quote holding the value being printed into. Unusable by anything nested in it. */
+  enclosingQuote?: '"' | "'";
+};
 
 /** The `~` of `{{~foo~}}`, which strips the whitespace next to the delimiter it sits on. */
 const trim = (marker: boolean | undefined): string => (marker ? '~' : '');
@@ -33,9 +41,35 @@ const hardlines = (count: number): Doc[] => Array.from({ length: count }, () => 
 
 /* Sibling whitespace is laid out as pieces so a hard break can end the run it sits in, rather
  * than forcing every other gap in the same program to break with it. */
-type Piece = { kind: 'break'; count: number } | { kind: 'space'; hard?: boolean } | { kind: 'doc'; doc: Doc };
+type Piece =
+  | { kind: 'break'; count: number }
+  | { kind: 'space'; hard?: boolean }
+  /** `withTail` is set on children that can take their container's closing marker inside them. */
+  | { kind: 'doc'; doc: Doc; withTail?: (tail: Doc) => Doc };
+
+/**
+ * A child that can take its container's closing marker inside it.
+ *
+ * Lazy rather than memoised: `withCloser` replaces the piece, so `doc` is never read on a child
+ * that got a tail. The getter buys not caching but never building the untailed doc at all,
+ * which on a deep chain of single children would double the work per level.
+ */
+function tailable(build: (tail: Doc) => Doc): Piece {
+  return {
+    kind: 'doc',
+    get doc(): Doc {
+      return build([]);
+    },
+    withTail: build,
+  };
+}
 
 const isGap = (piece: Piece): boolean => piece.kind !== 'doc';
+
+/* Built from the shared class so the character list stays written in one place, and hoisted so
+ * `textPieces` is not compiling a pattern per text run. */
+const whitespaceGap = new RegExp(`(${whitespace.htmlRun.source})`, 'u');
+const trailingWhitespace = new RegExp(`${whitespace.htmlRun.source}$`, 'u');
 
 /**
  * The governing rule: whitespace between siblings renders, so it is reproduced, never invented.
@@ -44,14 +78,14 @@ const isGap = (piece: Piece): boolean => piece.kind !== 'doc';
  */
 function whitespacePiece(text: string): Piece {
   const newlines = text.split('\n').length - 1;
-  return newlines === 0 ? { kind: 'space' } : { kind: 'break', count: Math.min(newlines, MAX_CONSECUTIVE_NEWLINES) };
+  return newlines === 0 ? { kind: 'space' } : { kind: 'break', count: Math.min(newlines, MAX_HARDLINES) };
 }
 
 /**
  * A text run decomposes into the same pieces as a sibling list: words, and the gaps between
  * them. Treating a run's interior differently from the gaps between nodes would make layout
- * depend on where the parser happened to put a node boundary - which is how a newline the
- * author wrote inside a text run used to come back as a space.
+ * depend on where the parser happened to put a node boundary, collapsing a newline the author
+ * wrote inside a text run to a space.
  */
 function textPieces(node: TextNode): Piece[] {
   /* Raw text and ignored regions are copied through; literalline keeps them off the indent. */
@@ -61,41 +95,62 @@ function textPieces(node: TextNode): Piece[] {
 
   /* ASCII whitespace only. A non-breaking space is content the author chose - it suppresses a
    * line break on the page - so it travels inside a word rather than becoming a gap. */
+  /* Splitting on a capture group already alternates word, gap, word, so the odd slots are the
+   * gaps - no second pattern to keep in step with the first. */
   return node.chars
-    .split(/([ \t\n\r\f]+)/u)
-    .filter(Boolean)
-    .map((part) => (/^[ \t\n\r\f]+$/u.test(part) ? whitespacePiece(part) : { kind: 'doc' as const, doc: part }));
+    .split(whitespaceGap)
+    .flatMap((part, index) =>
+      part === '' ? [] : [index % 2 === 1 ? whitespacePiece(part) : { kind: 'doc', doc: part }],
+    );
 }
 
 /* Recovered text is copied through, but its trailing whitespace belongs to the surrounding
  * program: left inside the raw it would be reprinted *and* re-added as a line ending, growing
  * the file by a newline on every pass. */
 function unmatchedPieces(node: UnmatchedNode): Piece[] {
-  const trailing = /\s+$/u.exec(node.raw)?.[0] ?? '';
+  /* In a value the trailing gap is content, not somewhere to break: split off as one it let the
+   * block around it break, and the printer indented the closing marker into a value the author
+   * owns - a space appeared on the page. */
+  if (node.preserveWhitespace) {
+    return [{ kind: 'doc', doc: join(literalline, node.raw.split('\n')) }];
+  }
+
+  /* ASCII only, as everywhere else: `\s` matches U+00A0, so on `\s` a non-breaking space ending
+   * an ignored region is rewritten as a plain one, and a run of them as a single space. */
+  const trailing = trailingWhitespace.exec(node.raw)?.[0] ?? '';
   const body = trailing ? node.raw.slice(0, -trailing.length) : node.raw;
 
-  return [
-    ...(body ? [{ kind: 'doc' as const, doc: join(literalline, body.split('\n')) }] : []),
-    ...(trailing ? [whitespacePiece(trailing)] : []),
-  ];
+  const pieces: Piece[] = [];
+
+  if (body) {
+    pieces.push({ kind: 'doc', doc: join(literalline, body.split('\n')) });
+  }
+
+  if (trailing) {
+    pieces.push(whitespacePiece(trailing));
+  }
+
+  return pieces;
 }
 
 /**
  * Each run between hard breaks wraps on its own. `fill` rather than `group`, so a run that does
  * not fit breaks only where it must - all-or-nothing is for attributes and call params, where
- * the whitespace is the formatter's; content wraps like prose.
- *
- * Adjacent pieces with no gap between them are glued in the source, so they merge into one fill
- * item: nothing may come between them.
+ * the whitespace is the formatter's; content wraps like prose. Adjacent pieces with no gap are
+ * glued in the source and merge into one fill item.
  */
 function assemble(pieces: Piece[]): Doc[] {
   const docs: Doc[] = [];
   const run: Doc[] = [];
   let glued: Doc[] = [];
 
+  /* A group, not a bare array: `propagateBreaks` marks a group holding a hard line as broken,
+   * and `fits` then refuses it, so `fill` prints the item in break mode and the groups inside it
+   * get measured one by one. Left as an array it measured as "fits" - `fits` stops at the first
+   * hard line - and everything after that line printed flat, over width, until the next pass. */
   const flushGlued = () => {
     if (glued.length > 0) {
-      run.push(glued.length === 1 ? glued[0] : glued);
+      run.push(glued.length === 1 ? glued[0] : group([...glued]));
       glued = [];
     }
   };
@@ -120,16 +175,14 @@ function assemble(pieces: Piece[]): Doc[] {
     }
 
     if (piece.kind === 'space') {
-      /* A space that must not become a line break is simply a space, glued to its neighbours. */
-      if (piece.hard) {
-        glued.push(' ');
-        continue;
-      }
-
       flushGlued();
-      /* fill reads even positions as content; keep separators on the odd ones. */
+      /* fill reads even positions as content; keep separators on the odd ones. A space that must
+       * not become a line break is still a separator - printing it as one keeps its neighbours
+       * as separate items that `fill` can measure. Gluing it to them makes everything downstream
+       * of a standalone-sensitive statement one unbreakable blob, holding a long tag after a
+       * `prettier-ignore` region over width until a second pass moves it. */
       if (run.length % 2 === 0) run.push('');
-      run.push(line);
+      run.push(spaceDoc(piece));
       continue;
     }
 
@@ -140,11 +193,18 @@ function assemble(pieces: Piece[]): Doc[] {
   return docs;
 }
 
+/** A space the printer may wrap at, or one it may not. */
+const spaceDoc = (piece: { hard?: boolean }): Doc => (piece.hard ? ' ' : line);
+
+/** Every space in the run becomes one the printer may not wrap at. */
+const harden = (pieces: Piece[]): Piece[] =>
+  pieces.map((piece) => (piece.kind === 'space' ? { kind: 'space', hard: true } : piece));
+
 /** Gaps outside a content run have nothing to wrap, so they print as themselves. */
 function gapDocs(gaps: Piece[]): Doc[] {
   return gaps.flatMap((gap) => {
     if (gap.kind === 'break') return hardlines(gap.count);
-    return gap.kind === 'space' ? [gap.hard ? ' ' : line] : [];
+    return gap.kind === 'space' ? [spaceDoc(gap)] : [];
   });
 }
 
@@ -205,12 +265,17 @@ function printStatement(node: MustacheStatement | PartialStatement | DecoratorSt
 }
 
 function printComment(node: CommentStatement): Doc {
-  const [open, close] = node.block || node.multiline ? ['{{!--', '--}}'] : ['{{!', '}}'];
+  /* `block` already covers a multiline body - the parser sets it for either - so re-testing
+   * `multiline` here only invited the two to be kept in step by hand. */
+  const [open, close] = node.block
+    ? [`{{${trim(node.trimOpen)}!--`, `--${trim(node.trimClose)}}}`]
+    : [`{{${trim(node.trimOpen)}!`, `${trim(node.trimClose)}}}`];
   const body = node.value;
 
-  /* `{{!< layout}}` is express-hbs' layout directive, not prose: padding it to `{{! < layout }}`
-   * stops it being recognised and the layout silently stops being applied. */
-  if (!node.block && !node.multiline && body.startsWith('<')) {
+  /* express-hbs' layout directive is not prose: padding `{{!< layout}}` to `{{! < layout }}`
+   * stops it being recognised and the layout silently stops being applied. The parser decides,
+   * from the source - the body alone cannot tell the directive from a comment about one. */
+  if (node.layout) {
     return [open, body, close];
   }
 
@@ -218,7 +283,7 @@ function printComment(node: CommentStatement): Doc {
    * the surrounding structure instead of staying frozen at the column it was written at.
    * Common indentation is stripped and re-applied, which keeps the body's *relative* shape. */
   if (/^\n/u.test(body)) {
-    const lines = stripCommonIndent(body.replace(/^\n/u, '').replace(/\s+$/u, '').split('\n'));
+    const lines = stripCommonIndent(body.replace(/^\n/u, '').replace(trailingWhitespace, '').split('\n'));
 
     return lines.every((line) => line === '')
       ? [open, hardline, close]
@@ -228,8 +293,18 @@ function printComment(node: CommentStatement): Doc {
   /* Otherwise pad only where the body is not already spaced away from the delimiter: padding
    * regardless puts trailing whitespace on the opening line, which re-parses differently on the
    * next pass. Continuation lines keep their own indentation, having nothing to hang from. */
-  const lead = body === '' || /^\s/u.test(body) ? '' : ' ';
-  const tail = body === '' || /\s$/u.test(body) ? '' : ' ';
+  /* An empty block comment still gets its spacing: `{{!----}}` reads as a typo, and it is what
+   * the formatter would otherwise write over every `{{!-- --}}` in a file. A line comment has no
+   * such problem - `{{!}}` is already what an empty one looks like. */
+  if (body === '') {
+    return node.block ? [open, ' ', close] : [open, close];
+  }
+
+  /* ASCII whitespace, not `\s`: a non-breaking space is content the author put there. Trimming
+   * on `\s` deleted one off the end of a block comment's body, and reading one as the pad it
+   * already had left a line comment unpadded. */
+  const lead = whitespace.html.test(body[0] ?? '') ? '' : ' ';
+  const tail = whitespace.html.test(body[body.length - 1] ?? '') ? '' : ' ';
 
   return [open, lead, join(literalline, body.split('\n')), tail, close];
 }
@@ -240,10 +315,12 @@ function printComment(node: CommentStatement): Doc {
  * Against the value's raw text, not just its TextNode parts: a quote inside a mustache is printed
  * too, so `class='{{t "x"}}'` cannot be re-quoted with `"` without ending the attribute early.
  */
-function chooseQuote(value: AttributeValue, preferSingle: boolean): '"' | "'" {
-  const preferred = preferSingle ? "'" : '"';
+/* A quote ends the value holding it, so a nested element cannot reuse the outer one. */
+function chooseQuote(value: AttributeValue, options: PrintOptions): '"' | "'" {
+  const preferred: '"' | "'" = options.singleQuote === true ? "'" : '"';
+  const candidates: Array<'"' | "'"> = [preferred, preferred === '"' ? "'" : '"'];
 
-  return value.raw.includes(preferred) ? (preferSingle ? '"' : "'") : preferred;
+  return candidates.find((q) => q !== options.enclosingQuote && !value.raw.includes(q)) ?? preferred;
 }
 
 function printAttribute(attribute: ElementAttribute, options: PrintOptions): Doc {
@@ -265,9 +342,10 @@ function printAttribute(attribute: ElementAttribute, options: PrintOptions): Doc
    * keeps a block's body from being laid out at the printer's indent level instead of the
    * author's - and what lets prettier see where the value's own lines end. */
   const { parts } = attribute.value;
-  const quote = chooseQuote(attribute.value, options.singleQuote === true);
+  const quote = chooseQuote(attribute.value, options);
+  const nested = { ...options, enclosingQuote: quote };
 
-  return [attribute.name, '=', quote, ...parts.map((part) => printAny(part, options)), quote];
+  return [attribute.name, '=', quote, ...parts.map((part) => printAny(part, nested)), quote];
 }
 
 /**
@@ -290,21 +368,22 @@ function printOpenTag(node: ElementNode, options: PrintOptions): Doc {
     return index === 0 || attribute.glued ? [printed] : [line, printed];
   });
 
-  return group(['<', node.tag, indent([line, ...attributes]), ifBreak([softline, marker.trimStart()], marker)]);
+  /* Same rule against the tag name itself: a first attribute the author glued on stays glued,
+   * or `<h{{level}}>` prints as `<h {{level}}>` and stops being a heading. */
+  const head = node.attributes[0].glued ? attributes : [line, ...attributes];
+
+  return group(['<', node.tag, indent(head), ifBreak([softline, marker.trimStart()], marker)]);
 }
 
 /**
  * The content between two markers - a tag's brackets, or a block's open and close - together
  * with the marker that ends it.
  *
- * The trailing gap sits inside the indent and is dedented from there, which lands the closing
- * marker back at the container's own level; dedenting outside the indent overshoots, and the
- * overshoot compounds with nesting depth.
+ * The trailing gap sits inside the indent, so the dedent lands the closer at the container's
+ * own level; dedenting outside overshoots, and the overshoot compounds with depth.
  *
- * When there is no trailing gap the closing marker is glued onto the last piece rather than
- * emitted after it. `fill` measures its last item with no knowledge of what follows, so a
- * `</p>` left outside did not count towards the width of the line it landed on: the line came
- * out over width, and the next pass - now seeing a real break there - printed it differently.
+ * With no trailing gap the closer is glued onto the last piece: `fill` measures its last item
+ * blind to what follows, so a `</p>` left outside would not count towards its line's width.
  */
 function printBody(pieces: Piece[], closer: Doc): Doc[] {
   if (pieces.length === 0) {
@@ -318,74 +397,133 @@ function printBody(pieces: Piece[], closer: Doc): Doc[] {
     return [...gapDocs(pieces.slice(0, 1)), closer];
   }
 
-  const trailing = gapDocs(pieces.slice(end)).map((doc) => dedent(doc));
-  const content: Piece[] =
-    trailing.length > 0 ? pieces.slice(start, end) : [...pieces.slice(start, end), { kind: 'doc', doc: closer }];
+  const leading = gapDocs(pieces.slice(0, start));
+  const trailing = gapDocs(pieces.slice(end)).map(dedent);
+  const content = pieces.slice(start, end);
 
-  return [
-    indent([...gapDocs(pieces.slice(0, start)), ...assemble(content), ...trailing]),
-    ...(trailing.length > 0 ? [closer] : []),
-  ];
-}
-
-function printElement(node: ElementNode, options: PrintOptions): Doc {
-  const openTag = printOpenTag(node, options);
-
-  if (node.selfClosing) {
-    return openTag;
+  if (trailing.length === 0) {
+    return [indent([...leading, ...assemble(withCloser(content, closer))])];
   }
 
-  return group([openTag, ...printBody(childPieces(node.children, options), ['</', node.tag, '>'])]);
+  return [indent([...leading, ...assemble(content), ...trailing]), closer];
 }
 
-function printBlock(node: BlockStatement, options: PrintOptions): Doc {
-  const branches = node.inverseChain ?? [];
-  const sections = [node.program, ...branches.map((branch) => branch.program), node.inverse].map((program) =>
-    childPieces(program.body, options),
-  );
+/**
+ * The closer goes *inside* the last child when that child has a body to put it in. `fill`
+ * measures its last item against an empty rest-stack, so a marker appended after the child is
+ * invisible to the width check one level down as well as at this one: the line came out over
+ * width, and the next pass - now seeing a real break there - printed it differently.
+ */
+function withCloser(content: Piece[], closer: Doc): Piece[] {
+  const last = content[content.length - 1];
 
-  /* A block the author kept on one line is an atom, body and markers alike: splitting `{{else if`
-   * from its condition to save a few columns is never an improvement, and wrapping the body would
-   * leave a marker alone on its line, where Handlebars strips the whitespace around it and the
-   * page changes. Once the body breaks, the markers already sit on their own lines. */
-  const breakable = sections.some((pieces) => pieces.some((piece) => piece.kind === 'break'));
-  const bodies = breakable
-    ? sections
-    : sections.map((pieces) => pieces.map((piece) => (piece.kind === 'space' ? { ...piece, hard: true } : piece)));
+  if (last?.kind === 'doc' && last.withTail) {
+    return [...content.slice(0, -1), { kind: 'doc', doc: last.withTail(closer) }];
+  }
 
+  return [...content, { kind: 'doc', doc: closer }];
+}
+
+/* Containers thread the marker into their body; everything else just carries it along. */
+function printWithTail(node: Node, options: PrintOptions, tail: Doc): Doc {
+  if (node.type === 'ElementNode') {
+    return printElement(node, options, tail);
+  }
+
+  if (node.type === 'BlockStatement') {
+    return printBlock(node, options, tail);
+  }
+
+  return [printAny(node, options), tail];
+}
+
+function printElement(node: ElementNode, options: PrintOptions, tail: Doc = []): Doc {
+  const openTag = printOpenTag(node, options);
+  const closer: Doc = ['</', node.closeTag ?? node.tag, '>', tail];
+  const doc: Doc = node.selfClosing
+    ? [openTag, tail]
+    : group([openTag, ...printBody(childPieces(node.children, options), closer)]);
+
+  /* Inside an attribute value every character renders, so the tag may not be broken across
+   * lines - that would put the printer's newlines and indent inside a value the author owns,
+   * changing the page. Only calls may still be reflowed: `{{ }}` never reaches the page. */
+  return node.preserveWhitespace ? removeLines(doc) : doc;
+}
+
+/**
+ * One marker and the body that follows it. `open` is deferred because whether a block may break
+ * is a property of every body at once, and the markers have to be printed knowing it.
+ */
+interface BlockSection {
+  program: Program;
+  open: (breakable: boolean) => Doc;
+}
+
+function printBlock(node: BlockStatement, options: PrintOptions, tail: Doc = []): Doc {
   const prefix = templateDialect.getPrintedBlockPrefix(node.blockPrefix ?? '#');
-  const markers: Doc[] = [printCall(node, ['{{', trim(node.trimOpen), prefix], [trim(node.trimClose), '}}'], breakable)];
-  const between: Piece[][] = [bodies[0]];
+  const elseKeyword = templateDialect.getElseKeyword();
 
-  branches.forEach((branch, index) => {
-    const open = ['{{', trim(branch.trimOpen), `${templateDialect.getElseKeyword()} `];
-    markers.push(printCall(branch, open, [trim(branch.trimClose), '}}'], breakable));
-    between.push(bodies[index + 1]);
-  });
+  const sections: BlockSection[] = [
+    {
+      program: node.program,
+      open: (breakable) =>
+        printCall(node, ['{{', trim(node.trimOpen), prefix], [trim(node.trimClose), '}}'], breakable),
+    },
+    ...(node.inverseChain ?? []).map((branch) => ({
+      program: branch.program,
+      open: (breakable: boolean) =>
+        printCall(branch, ['{{', trim(branch.trimOpen), `${elseKeyword} `], [trim(branch.trimClose), '}}'], breakable),
+    })),
+  ];
 
   /* An empty `{{else}}` prints nothing - unless it carries `~`, which strips whitespace that
    * would otherwise render. */
   if (node.inverse.body.length > 0 || node.inverseTrimOpen || node.inverseTrimClose) {
-    markers.push(['{{', trim(node.inverseTrimOpen), templateDialect.getElseKeyword(), trim(node.inverseTrimClose), '}}']);
-    between.push(bodies[bodies.length - 1]);
+    sections.push({
+      program: node.inverse,
+      open: () => ['{{', trim(node.inverseTrimOpen), elseKeyword, trim(node.inverseTrimClose), '}}'],
+    });
   }
 
-  markers.push([
+  const close: Doc = [
     '{{',
     trim(node.closeTrimOpen),
     templateDialect.getBlockClosePrefix(node.path.source),
     trim(node.closeTrimClose),
     '}}',
-  ]);
+    tail,
+  ];
+
+  const pieces = sections.map((section) => childPieces(section.program.body, options));
+
+  /* A section the author kept on one line is an atom: wrapping its body would leave a marker
+   * alone on its line, where Handlebars strips the whitespace around it and the page changes.
+   * Per section, not per block - read whole-block, a newline in one branch unwrapped the rest.
+   * Markers stay a whole-block decision; splitting `{{else if` from its condition never helps. */
+  const sectionBreaks = pieces.map((body) => body.some((piece) => piece.kind === 'break'));
+  const breakable = sectionBreaks.some(Boolean);
+  const opens = sections.map((section) => section.open(breakable));
 
   /* Each body carries the marker that closes it, so `fill` can see it when measuring. */
-  return group([markers[0], ...between.flatMap((pieces, index) => printBody(pieces, markers[index + 1]))]);
+  return group([
+    opens[0],
+    ...pieces.flatMap((body, index) =>
+      printBody(sectionBreaks[index] ? body : harden(body), opens[index + 1] ?? close),
+    ),
+  ]);
 }
 
-/* Handlebars strips the whitespace around a partial, comment or block that ends up alone on its
- * line - a mustache is not treated that way. So a space next to one of these has to stay a
- * space: wrapping there would start or stop that stripping, and change what the page shows. */
-const standaloneStatements = new Set(['PartialStatement', 'CommentStatement', 'BlockStatement', 'DecoratorStatement']);
+/* Handlebars strips the whitespace around a partial, comment or block left alone on its line -
+ * a mustache is not - so a space next to one has to stay a space: wrapping there would start or
+ * stop that stripping. `UnmatchedNode` is in the set because its verbatim text may begin or end
+ * with any of them. */
+const standaloneStatements = new Set<Node['type']>([
+  'PartialStatement',
+  'CommentStatement',
+  'BlockStatement',
+  'DecoratorStatement',
+  'UnmatchedNode',
+]);
 
 /**
  * Children need no separators: the whitespace between them is already in the tree, so the
@@ -402,7 +540,10 @@ function childPieces(nodes: Node[], options: PrintOptions): Piece[] {
     }
 
     if (child.type === 'UnmatchedNode') {
-      pieces.push(...unmatchedPieces(child));
+      const verbatim = unmatchedPieces(child);
+      /* Both edges: the text is opaque, so either end may be a standalone statement. */
+      sensitive.push(pieces.length, pieces.length + verbatim.length - 1);
+      pieces.push(...verbatim);
       continue;
     }
 
@@ -410,7 +551,7 @@ function childPieces(nodes: Node[], options: PrintOptions): Piece[] {
       sensitive.push(pieces.length);
     }
 
-    pieces.push({ kind: 'doc', doc: printAny(child, options) });
+    pieces.push(tailable((tail) => printWithTail(child, options, tail)));
   }
 
   for (const at of sensitive) {
@@ -460,8 +601,11 @@ function printAny(node: Node, options: PrintOptions): Doc {
     case 'CommentStatement':
       return printComment(node);
 
+    /* `childPieces` intercepts these, so this arm only keeps the switch exhaustive. It goes
+     * through `unmatchedPieces` all the same, rather than repeating it: a second copy drifts,
+     * and one missing the trailing-whitespace split grows the file by a newline every pass. */
     case 'UnmatchedNode':
-      return join(literalline, node.raw.split('\n'));
+      return assemble(unmatchedPieces(node));
 
     case 'ElementNode':
       return printElement(node, options);
