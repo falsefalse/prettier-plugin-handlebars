@@ -80,10 +80,7 @@ export function scanTag(
     }
 
     if (afterEquals && char !== '>') {
-      pos =
-        char === '"' || char === "'"
-          ? readQuotedAttributeValue(text, pos + 1, char).position
-          : readUnquotedValueEnd(text, pos);
+      pos = readAttributeValue(text, pos).end;
       afterEquals = false;
       continue;
     }
@@ -182,6 +179,24 @@ export function readUnquotedValueEnd(text: string, position: number): number {
   }
 
   return pos;
+}
+
+/**
+ * An attribute value's extent and its text, whichever way it was written. The quotes are not
+ * part of the value, so `start` is inside them - getting that `+ 1` wrong shifts every range a
+ * mustache inside the value reports.
+ */
+export function readAttributeValue(text: string, position: number): { raw: string; start: number; end: number } {
+  const quote = text[position];
+
+  if (quote === '"' || quote === "'") {
+    const quoted = readQuotedAttributeValue(text, position + 1, quote);
+    return { raw: quoted.value, start: position + 1, end: quoted.position };
+  }
+
+  const end = readUnquotedValueEnd(text, position);
+
+  return { raw: text.slice(position, end), start: position, end };
 }
 
 export function readQuotedAttributeValue(

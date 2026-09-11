@@ -16,10 +16,9 @@ import {
   attributeNameCharacter,
   isTagStart,
   readAttributeName,
+  readAttributeValue,
   readCloseTagSource,
   readName,
-  readQuotedAttributeValue,
-  readUnquotedValueEnd,
   sameTag,
   skipWhitespace,
   startsCloseTag,
@@ -406,19 +405,18 @@ function parseBlock(
   token: MustacheToken,
   rangeOffset: number,
 ): { node: BlockStatement; next: number; closed: boolean } {
-  const blockExpression = getBlockExpression(token);
-  const openInfo = parseCall(
-    blockExpression,
-    rangeOffset + contentOffset(text, token.start, token.end, blockExpression),
-  );
+  /* A call's source is a slice of its own token, so its parts locate against the template. */
+  const callAt = (at: MustacheToken, source: string) =>
+    parseCall(source, rangeOffset + contentOffset(text, at.start, at.end, source));
+
+  const openInfo = callAt(token, getBlockExpression(token));
   const blockPrefix = getBlockPrefix(token);
-  const { nodes: program, position: afterProgram, endReason, endToken } = parseChildren(
-    text,
-    token.end,
-    null,
-    openInfo.path.source,
-    rangeOffset,
-  );
+
+  /* Every branch reads to the same terminator - this block's own closer - so they differ only
+   * in where they start. */
+  const parseBranch = (from: number) => parseChildren(text, from, null, openInfo.path.source, rangeOffset);
+
+  const { nodes: program, position: afterProgram, endReason, endToken } = parseBranch(token.end);
   const buildProgram = (nodes: Node[], start: number, end: number): Program =>
     withRange({ type: 'Program', body: nodes }, rangeOffset + start, rangeOffset + end);
   /* A program ends where its terminator begins, not after it, so the body tiles the range. */
@@ -427,29 +425,23 @@ function parseBlock(
   /* Set only when the author wrote a bare `{{else}}`; otherwise the empty inverse is built at
    * the end, once the closer's position is known. Anchoring it at `afterProgram` up here put it
    * inside the else-if chain - a point belonging to a different section of the block. */
-  let inverseBody: Program | undefined;
+  let inverse: { program: Program; trimOpen: boolean; trimClose: boolean } | undefined;
   const inverseChain: ElseBranch[] = [];
   let finalPos = afterProgram;
   let closeToken = endReason === 'blockEnd' ? endToken : undefined;
-  let inverseTrimOpen = false;
-  let inverseTrimClose = false;
 
   if (endReason === 'else' && endToken) {
     let currentElseToken: MustacheToken | undefined = endToken;
     let currentPosition = afterProgram;
 
     while (currentElseToken?.specialForm === 'elseIf') {
-      const branchExpressionText = currentElseToken.content.replace(/^else\s+/, '');
-      const branchExpression = parseCall(
-        branchExpressionText,
-        rangeOffset + contentOffset(text, currentElseToken.start, currentElseToken.end, branchExpressionText),
-      );
+      const branchExpression = callAt(currentElseToken, currentElseToken.content.replace(/^else\s+/, ''));
       const {
         nodes: branchNodes,
         position: afterBranch,
         endReason: branchEndReason,
         endToken: branchEndToken,
-      } = parseChildren(text, currentPosition, null, openInfo.path.source, rangeOffset);
+      } = parseBranch(currentPosition);
 
       inverseChain.push(
         withRange(
@@ -478,15 +470,18 @@ function parseBlock(
     }
 
     if (currentElseToken) {
-      inverseTrimOpen = currentElseToken.trimOpen;
-      inverseTrimClose = currentElseToken.trimClose;
       const {
         nodes: inverseNodes,
         position: afterInverse,
         endReason: inverseEndReason,
         endToken: inverseEndToken,
-      } = parseChildren(text, currentPosition, null, openInfo.path.source, rangeOffset);
-      inverseBody = buildProgram(inverseNodes, currentElseToken.end, inverseEndToken?.start ?? afterInverse);
+      } = parseBranch(currentPosition);
+
+      inverse = {
+        program: buildProgram(inverseNodes, currentElseToken.end, inverseEndToken?.start ?? afterInverse),
+        trimOpen: currentElseToken.trimOpen,
+        trimClose: currentElseToken.trimClose,
+      };
       finalPos = afterInverse;
       closeToken = inverseEndReason === 'blockEnd' ? inverseEndToken : undefined;
     }
@@ -502,9 +497,9 @@ function parseBlock(
       /* An empty inverse sits where the block's closer starts: after every branch, before
        * `{{/if}}`. It is a zero-width point, so it has to be a position the block actually
        * owns. */
-      inverse: inverseBody ?? buildProgram([], closerAnchor, closerAnchor),
-      ...(inverseTrimOpen ? { inverseTrimOpen } : {}),
-      ...(inverseTrimClose ? { inverseTrimClose } : {}),
+      inverse: inverse?.program ?? buildProgram([], closerAnchor, closerAnchor),
+      ...(inverse?.trimOpen ? { inverseTrimOpen: true } : {}),
+      ...(inverse?.trimClose ? { inverseTrimClose: true } : {}),
       blockPrefix,
       trimOpen: token.trimOpen,
       trimClose: token.trimClose,
@@ -643,7 +638,7 @@ function consumeInvalidVoidElementClose(text: string, position: number, tag: str
 function parseAttribute(
   text: string,
   position: number,
-  rangeOffset = 0,
+  rangeOffset: number,
 ): { attribute: ElementAttribute; position: number } | null {
   let pos = position;
   pos = skipWhitespace(text, pos);
@@ -664,21 +659,8 @@ function parseAttribute(
   pos += 1;
   pos = skipWhitespace(text, pos);
 
-  let rawValue = '';
-  let valueStart = pos;
-  if (text[pos] === '"' || text[pos] === "'") {
-    const quote = text[pos];
-    pos += 1;
-    valueStart = pos;
-    const quoted = readQuotedAttributeValue(text, pos, quote);
-    rawValue = quoted.value;
-    pos = quoted.position;
-  } else {
-    const start = pos;
-    valueStart = start;
-    pos = readUnquotedValueEnd(text, pos);
-    rawValue = text.slice(start, pos);
-  }
+  const { raw: rawValue, start: valueStart, end } = readAttributeValue(text, pos);
+  pos = end;
 
   /* A value holding both quote characters cannot be printed: whichever one the printer wraps it
    * in ends the attribute early: `title=a"b'c` would print as `title='a"b'c'`, which HTML reads
@@ -763,15 +745,7 @@ function parseDynamicAttribute(
 
   /* A value overrides that: it attaches to the composite name, and once the name is split
    * there is nothing left to attach it to. */
-  pos = skipWhitespace(text, afterName + 1);
-
-  if (text[pos] === '"' || text[pos] === "'") {
-    const quote = text[pos];
-    pos += 1;
-    pos = readQuotedAttributeValue(text, pos, quote).position;
-  } else {
-    pos = readUnquotedValueEnd(text, pos);
-  }
+  pos = readAttributeValue(text, skipWhitespace(text, afterName + 1)).end;
 
   return {
     attribute: createRawAttribute(text.slice(start, pos)),
