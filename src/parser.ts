@@ -8,7 +8,7 @@ import {
   ElseBranch,
   ParseEndReason,
 } from './types';
-import { voidElements, rawTextElements } from './core/html';
+import { isRawTextElement, isVoidElement } from './core/html';
 import { normalizeInput, withOptionalRange, withRange } from './core/source';
 import { fail, TemplateSyntaxError } from './core/errors';
 import * as whitespace from './core/whitespace';
@@ -101,7 +101,7 @@ function parseChildren(
   const nodes: Node[] = [];
   let pos = position;
 
-  if (endTag && rawTextElements.has(endTag.toLowerCase())) {
+  if (endTag && isRawTextElement(endTag)) {
     return parseRawTextChildren(text, pos, endTag, rangeOffset);
   }
 
@@ -157,9 +157,7 @@ function parseChildren(
      * included: what renders is the printer's to decide, not the parser's to discard. */
     const nextMarkup = findNextMarkup(text, pos);
     if (nextMarkup > pos) {
-      nodes.push(
-        textNode(text, pos, nextMarkup, rangeOffset),
-      );
+      nodes.push(textNode(text, pos, nextMarkup, rangeOffset));
     }
     pos = nextMarkup;
   }
@@ -199,92 +197,91 @@ function parseMustacheChild(
   rangeOffset: number,
   nodes: Node[],
 ): ChildStep {
-    const token = parseMustacheToken(text, pos);
+  const token = parseMustacheToken(text, pos);
 
-    if (!token.terminated) {
-      const [open, close] = isHandlebarsBlockComment(text, pos)
-        ? ['{{!--', '--}}']
-        : token.triple
-          ? ['{{{', '}}}']
-          : [text.startsWith('{{!', pos) ? '{{!' : '{{', '}}'];
-      fail(`unterminated ${open}: expected ${close}`, rangeOffset + pos, rangeOffset + token.end);
-    }
+  if (!token.terminated) {
+    const [open, close] = isHandlebarsBlockComment(text, pos)
+      ? ['{{!--', '--}}']
+      : token.triple
+        ? ['{{{', '}}}']
+        : [text.startsWith('{{!', pos) ? '{{!' : '{{', '}}'];
+    fail(`unterminated ${open}: expected ${close}`, rangeOffset + pos, rangeOffset + token.end);
+  }
 
-    if (shouldPreserveMustacheVerbatim(token) && !(endBlock && token.kind === 'else')) {
-      nodes.push(createUnmatchedNode(text, pos, token.end, rangeOffset));
-      return token.end;
-    }
-
-    if (token.kind === 'comment') {
-      const ignoreDirective = getPrettierIgnoreDirective(commentBody(token));
-
-      if (ignoreDirective === 'start') {
-        const ignoreStart = pos;
-        const ignoreEnd = findPrettierIgnoreEnd(text, token.end);
-
-        if (ignoreEnd === null) {
-          fail(
-            'unterminated prettier-ignore region: expected {{! prettier-ignore-end }}',
-            rangeOffset + ignoreStart,
-            rangeOffset + token.end,
-          );
-        }
-
-        nodes.push(createUnmatchedNode(text, ignoreStart, ignoreEnd, rangeOffset));
-        return ignoreEnd;
-      }
-
-      if (ignoreDirective === 'next') {
-        const ignoredEnd = consumeNextNode(text, token.end);
-
-        /* Nothing follows to ignore, so the directive is only a comment. */
-        if (ignoredEnd <= token.end) {
-          nodes.push(createComment(token, rangeOffset + pos, rangeOffset + token.end));
-          return token.end;
-        }
-
-        nodes.push(createUnmatchedNode(text, pos, ignoredEnd, rangeOffset));
-        return ignoredEnd;
-      }
-    }
-
-    if (endBlock && token.kind === 'blockEnd' && token.name === endBlock) {
-      return { nodes, position: token.end, endReason: 'blockEnd', endToken: token };
-    }
-
-    if (endBlock && token.kind === 'else') {
-      return { nodes, position: token.end, endReason: 'else', endToken: token };
-    }
-
-    if (token.kind === 'blockStart') {
-      if (!hasMatchingBlockEnd(text, token)) {
-        fail(`unclosed block: expected {{/${token.name ?? ''}}}`, rangeOffset + pos, rangeOffset + token.end);
-      }
-
-      const { node, next, closed } = parseBlock(text, token, rangeOffset);
-      if (!closed) {
-        fail(`unclosed block: expected {{/${token.name ?? ''}}}`, rangeOffset + pos, rangeOffset + token.end);
-      }
-
-      nodes.push(node);
-      return next;
-    }
-
-    if (token.kind === 'blockEnd') {
-      fail(
-        endBlock
-          ? `unexpected {{/${token.name ?? ''}}}: expected {{/${endBlock}}}`
-          : `unexpected {{/${token.name ?? ''}}}: no block is open`,
-        rangeOffset + pos,
-        rangeOffset + token.end,
-      );
-    }
-
-    /* Blocks and terminators are handled above, so the only kind left that `createStatement`
-     * declines is a stray `{{else}}` with nothing open - kept as a mustache. */
-    nodes.push(createStatement(text, token, pos, rangeOffset) ?? createMustache(text, token, pos, rangeOffset));
+  if (shouldPreserveMustacheVerbatim(token) && !(endBlock && token.kind === 'else')) {
+    nodes.push(createUnmatchedNode(text, pos, token.end, rangeOffset));
     return token.end;
-  
+  }
+
+  if (token.kind === 'comment') {
+    const ignoreDirective = getPrettierIgnoreDirective(commentBody(token));
+
+    if (ignoreDirective === 'start') {
+      const ignoreStart = pos;
+      const ignoreEnd = findPrettierIgnoreEnd(text, token.end);
+
+      if (ignoreEnd === null) {
+        fail(
+          'unterminated prettier-ignore region: expected {{! prettier-ignore-end }}',
+          rangeOffset + ignoreStart,
+          rangeOffset + token.end,
+        );
+      }
+
+      nodes.push(createUnmatchedNode(text, ignoreStart, ignoreEnd, rangeOffset));
+      return ignoreEnd;
+    }
+
+    if (ignoreDirective === 'next') {
+      const ignoredEnd = consumeNextNode(text, token.end);
+
+      /* Nothing follows to ignore, so the directive is only a comment. */
+      if (ignoredEnd <= token.end) {
+        nodes.push(createComment(token, rangeOffset + pos, rangeOffset + token.end));
+        return token.end;
+      }
+
+      nodes.push(createUnmatchedNode(text, pos, ignoredEnd, rangeOffset));
+      return ignoredEnd;
+    }
+  }
+
+  if (endBlock && token.kind === 'blockEnd' && token.name === endBlock) {
+    return { nodes, position: token.end, endReason: 'blockEnd', endToken: token };
+  }
+
+  if (endBlock && token.kind === 'else') {
+    return { nodes, position: token.end, endReason: 'else', endToken: token };
+  }
+
+  if (token.kind === 'blockStart') {
+    if (!hasMatchingBlockEnd(text, token)) {
+      fail(`unclosed block: expected {{/${token.name ?? ''}}}`, rangeOffset + pos, rangeOffset + token.end);
+    }
+
+    const { node, next, closed } = parseBlock(text, token, rangeOffset);
+    if (!closed) {
+      fail(`unclosed block: expected {{/${token.name ?? ''}}}`, rangeOffset + pos, rangeOffset + token.end);
+    }
+
+    nodes.push(node);
+    return next;
+  }
+
+  if (token.kind === 'blockEnd') {
+    fail(
+      endBlock
+        ? `unexpected {{/${token.name ?? ''}}}: expected {{/${endBlock}}}`
+        : `unexpected {{/${token.name ?? ''}}}: no block is open`,
+      rangeOffset + pos,
+      rangeOffset + token.end,
+    );
+  }
+
+  /* Blocks and terminators are handled above, so the only kind left that `createStatement`
+   * declines is a stray `{{else}}` with nothing open - kept as a mustache. */
+  nodes.push(createStatement(text, token, pos, rangeOffset) ?? createMustache(text, token, pos, rangeOffset));
+  return token.end;
 }
 
 function parseElementChild(
@@ -295,102 +292,62 @@ function parseElementChild(
   rangeOffset: number,
   nodes: Node[],
 ): ChildStep {
-    if (text.startsWith('<!', pos) && !text.startsWith('<!--', pos)) {
-      const closeIdx = text.indexOf('>', pos + 2);
-      /* Unterminated, so the declaration runs to the end of the input - but its trailing
-       * whitespace is still the author's. Folding that into the verbatim run makes the
-       * printer's own final newline additive, and the file grows a line on every format. */
-      const end = closeIdx >= 0 ? closeIdx + 1 : trimTrailingWhitespace(text, pos);
-      nodes.push(
-        textNode(text, pos, end, rangeOffset, true),
-      );
-      return end;
+  if (text.startsWith('<!', pos) && !text.startsWith('<!--', pos)) {
+    const closeIdx = text.indexOf('>', pos + 2);
+    /* Unterminated, so the declaration runs to the end of the input - but its trailing
+     * whitespace is still the author's. Folding that into the verbatim run makes the
+     * printer's own final newline additive, and the file grows a line on every format. */
+    const end = closeIdx >= 0 ? closeIdx + 1 : trimTrailingWhitespace(text, pos);
+    nodes.push(textNode(text, pos, end, rangeOffset, true));
+    return end;
+  }
+
+  if (!isTagStart(text, pos)) {
+    const nextMarkup = findNextMarkup(text, pos + 1);
+    nodes.push(textNode(text, pos, nextMarkup, rangeOffset));
+    return nextMarkup;
+  }
+
+  if (text.startsWith('<!--', pos)) {
+    const closeIdx = text.indexOf('-->', pos + 4);
+    if (closeIdx < 0) {
+      fail("unterminated HTML comment: expected '-->'", rangeOffset + pos, rangeOffset + text.length);
     }
 
-    if (!isTagStart(text, pos)) {
-      const nextMarkup = findNextMarkup(text, pos + 1);
-      nodes.push(
-        textNode(text, pos, nextMarkup, rangeOffset),
-      );
-      return nextMarkup;
+    const end = closeIdx + 3;
+
+    nodes.push(textNode(text, pos, end, rangeOffset, true));
+    return end;
+  }
+
+  const tagResult = parseTag(text, pos, rangeOffset);
+
+  if (!tagResult.terminated) {
+    fail("unterminated tag: expected '>'", rangeOffset + pos, rangeOffset + tagResult.end);
+  }
+
+  if (tagResult.kind === 'close') {
+    if (endTag && sameTag(tagResult.tag, endTag)) {
+      return { nodes, position: tagResult.end, endReason: 'tagClose', contentEnd: pos, closeTag: tagResult.source };
     }
 
-    if (text.startsWith('<!--', pos)) {
-      const closeIdx = text.indexOf('-->', pos + 4);
-      if (closeIdx < 0) {
-        fail("unterminated HTML comment: expected '-->'", rangeOffset + pos, rangeOffset + text.length);
-      }
+    fail(
+      endTag
+        ? `unexpected </${tagResult.tag}>: expected </${endTag}>`
+        : `unexpected </${tagResult.tag}>: no tag is open`,
+      rangeOffset + pos,
+      rangeOffset + tagResult.end,
+    );
+  }
 
-      const end = closeIdx + 3;
-
-      nodes.push(
-        textNode(text, pos, end, rangeOffset, true),
-      );
-      return end;
-    }
-
-    const tagResult = parseTag(text, pos, rangeOffset);
-
-    if (!tagResult.terminated) {
-      fail("unterminated tag: expected '>'", rangeOffset + pos, rangeOffset + tagResult.end);
-    }
-
-    if (tagResult.kind === 'close') {
-      if (endTag && sameTag(tagResult.tag, endTag)) {
-        const contentEnd = pos;
-        pos = tagResult.end;
-        return { nodes, position: pos, endReason: 'tagClose', contentEnd, closeTag: tagResult.source };
-      }
-
+  if (tagResult.kind === 'selfClosing') {
+    const invalidVoidCloseEnd = consumeInvalidVoidElementClose(text, tagResult.end, tagResult.tag);
+    if (invalidVoidCloseEnd !== null) {
       fail(
-        endTag
-          ? `unexpected </${tagResult.tag}>: expected </${endTag}>`
-          : `unexpected </${tagResult.tag}>: no tag is open`,
-        rangeOffset + pos,
+        `<${tagResult.tag}> is a void element and cannot be closed`,
         rangeOffset + tagResult.end,
+        rangeOffset + invalidVoidCloseEnd,
       );
-    }
-
-    if (tagResult.kind === 'selfClosing') {
-      const invalidVoidCloseEnd = consumeInvalidVoidElementClose(text, tagResult.end, tagResult.tag);
-      if (invalidVoidCloseEnd !== null) {
-        fail(
-          `<${tagResult.tag}> is a void element and cannot be closed`,
-          rangeOffset + tagResult.end,
-          rangeOffset + invalidVoidCloseEnd,
-        );
-      }
-
-      nodes.push(
-        withRange(
-          {
-            type: 'ElementNode',
-            tag: tagResult.tag,
-            attributes: tagResult.attributes,
-            children: [],
-            selfClosing: true,
-            attributesRange: tagResult.attributesRange,
-          },
-          rangeOffset + pos,
-          rangeOffset + tagResult.end,
-        ),
-      );
-      return tagResult.end;
-    }
-
-    if (findMatchingTagClose(text, tagResult.tag, tagResult.end, blockBoundary) === null) {
-      fail(`unclosed tag: expected </${tagResult.tag}>`, rangeOffset + pos, rangeOffset + tagResult.end);
-    }
-
-    const {
-      nodes: children,
-      position: newPos,
-      endReason: childEndReason,
-      contentEnd,
-      closeTag,
-    } = parseChildren(text, tagResult.end, tagResult.tag, null, rangeOffset);
-    if (childEndReason !== 'tagClose') {
-      fail(`unclosed tag: expected </${tagResult.tag}>`, rangeOffset + pos, rangeOffset + tagResult.end);
     }
 
     nodes.push(
@@ -399,24 +356,55 @@ function parseElementChild(
           type: 'ElementNode',
           tag: tagResult.tag,
           attributes: tagResult.attributes,
-          children,
-          selfClosing: false,
-          ...(closeTag && closeTag !== tagResult.tag ? { closeTag } : {}),
+          children: [],
+          selfClosing: true,
           attributesRange: tagResult.attributesRange,
-          contentRange: [rangeOffset + tagResult.end, rangeOffset + (contentEnd ?? newPos)],
         },
         rangeOffset + pos,
-        rangeOffset + newPos,
+        rangeOffset + tagResult.end,
       ),
     );
-    return newPos;
-  
+    return tagResult.end;
+  }
+
+  if (findMatchingTagClose(text, tagResult.tag, tagResult.end, blockBoundary) === null) {
+    fail(`unclosed tag: expected </${tagResult.tag}>`, rangeOffset + pos, rangeOffset + tagResult.end);
+  }
+
+  const {
+    nodes: children,
+    position: newPos,
+    endReason: childEndReason,
+    contentEnd,
+    closeTag,
+  } = parseChildren(text, tagResult.end, tagResult.tag, null, rangeOffset);
+  if (childEndReason !== 'tagClose') {
+    fail(`unclosed tag: expected </${tagResult.tag}>`, rangeOffset + pos, rangeOffset + tagResult.end);
+  }
+
+  nodes.push(
+    withRange(
+      {
+        type: 'ElementNode',
+        tag: tagResult.tag,
+        attributes: tagResult.attributes,
+        children,
+        selfClosing: false,
+        ...(closeTag && closeTag !== tagResult.tag ? { closeTag } : {}),
+        attributesRange: tagResult.attributesRange,
+        contentRange: [rangeOffset + tagResult.end, rangeOffset + (contentEnd ?? newPos)],
+      },
+      rangeOffset + pos,
+      rangeOffset + newPos,
+    ),
+  );
+  return newPos;
 }
 
 function parseBlock(
   text: string,
   token: MustacheToken,
-  rangeOffset = 0,
+  rangeOffset: number,
 ): { node: BlockStatement; next: number; closed: boolean } {
   const blockExpression = getBlockExpression(token);
   const openInfo = parseCall(
@@ -531,7 +519,7 @@ function parseBlock(
   return { node, next: finalPos, closed: Boolean(closeToken) };
 }
 
-function parseTag(text: string, position: number, rangeOffset = 0): ParsedTag {
+function parseTag(text: string, position: number, rangeOffset: number): ParsedTag {
   let pos = position + 1; // skip '<'
 
   if (text[pos] === '/') {
@@ -552,6 +540,9 @@ function parseTag(text: string, position: number, rangeOffset = 0): ParsedTag {
   const attributes: ElementAttribute[] = [];
   const headStart = pos;
   const span = (headEnd: number): [number, number] => [rangeOffset + headStart, rangeOffset + headEnd];
+  /* A void element is self-closing however it was written, so `<br>` and `<br/>` agree. */
+  const kindOf = (selfClosed: boolean): 'open' | 'selfClosing' =>
+    selfClosed || isVoidElement(tag) ? 'selfClosing' : 'open';
   let glued = false;
   let attrStart = pos;
 
@@ -611,16 +602,11 @@ function parseTag(text: string, position: number, rangeOffset = 0): ParsedTag {
       continue;
     }
 
-    if (text[pos] === '/' && text[pos + 1] === '>') {
+    const selfClosed = text[pos] === '/' && text[pos + 1] === '>';
+    if (selfClosed || text[pos] === '>') {
       const headEnd = pos;
-      pos += 2;
-      return { kind: 'selfClosing', tag, attributes, attributesRange: span(headEnd), end: pos, terminated: true };
-    }
-    if (text[pos] === '>') {
-      const headEnd = pos;
-      pos += 1;
-      const kind = voidElements.has(tag.toLowerCase()) ? 'selfClosing' : 'open';
-      return { kind, tag, attributes, attributesRange: span(headEnd), end: pos, terminated: true };
+      pos += selfClosed ? 2 : 1;
+      return { kind: kindOf(selfClosed), tag, attributes, attributesRange: span(headEnd), end: pos, terminated: true };
     }
 
     const attr = parseAttribute(text, pos, rangeOffset);
@@ -635,12 +621,11 @@ function parseTag(text: string, position: number, rangeOffset = 0): ParsedTag {
     pos = attr.position;
   }
 
-  const kind = voidElements.has(tag.toLowerCase()) ? 'selfClosing' : 'open';
-  return { kind, tag, attributes, attributesRange: span(pos), end: pos, terminated: false };
+  return { kind: kindOf(false), tag, attributes, attributesRange: span(pos), end: pos, terminated: false };
 }
 
 function consumeInvalidVoidElementClose(text: string, position: number, tag: string): number | null {
-  if (!voidElements.has(tag.toLowerCase())) {
+  if (!isVoidElement(tag)) {
     return null;
   }
 
@@ -827,10 +812,7 @@ function createRawAttribute(raw: string): ElementAttribute {
   };
 }
 
-function parseAttributeValueParts(
-  value: string,
-  rangeOffset = 0,
-): AttributeValuePart[] {
+function parseAttributeValueParts(value: string, rangeOffset: number): AttributeValuePart[] {
   const parts: AttributeValuePart[] = [];
   let pos = 0;
 

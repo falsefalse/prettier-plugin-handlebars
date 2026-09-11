@@ -1,6 +1,6 @@
 /* Character-level readers: where a tag, a name or a value ends. Nothing here builds a node or
  * knows what a block is, so everything above can be read without this file open. */
-import { voidElements } from '../core/html';
+import { isVoidElement } from '../core/html';
 import { scanPastQuotes } from '../core/scan';
 import * as whitespace from '../core/whitespace';
 import { handlebarsDialect } from '../dialects/handlebars/tokens';
@@ -52,7 +52,7 @@ export function scanTag(
       return 'close';
     }
 
-    return selfClosed || voidElements.has(tag.toLowerCase()) ? 'selfClosing' : 'open';
+    return selfClosed || isVoidElement(tag) ? 'selfClosing' : 'open';
   };
 
   /* A quote only delimits a value directly after `=`, whitespace aside. Treating every quote as

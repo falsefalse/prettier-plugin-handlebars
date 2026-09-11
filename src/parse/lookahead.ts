@@ -1,6 +1,6 @@
 /* Lookahead: where a construct ends, without building anything. Every answer is an index, so
  * the tree builder can decide whether to refuse before it has committed to a node. */
-import { rawTextElements } from '../core/html';
+import { isRawTextElement } from '../core/html';
 import { fail } from '../core/errors';
 import { handlebarsDialect, handlebarsRawBlockCloser, handlebarsRawBlockName } from '../dialects/handlebars/tokens';
 import type { HandlebarsToken as MustacheToken } from '../dialects/handlebars/tokens';
@@ -217,7 +217,7 @@ function skipMustache(text: string, position: number): number {
 }
 
 export function findMatchingTagClose(text: string, tag: string, position: number, limit = -1): number | null {
-  if (rawTextElements.has(tag.toLowerCase())) {
+  if (isRawTextElement(tag)) {
     const closeStart = findRawTextClose(text, position, tag);
     if (closeStart === -1 || (limit >= 0 && closeStart >= limit)) {
       return null;
@@ -282,7 +282,7 @@ export function findMatchingTagClose(text: string, tag: string, position: number
       continue;
     }
 
-    if (tagResult.kind === 'open' && rawTextElements.has(tagResult.tag.toLowerCase())) {
+    if (tagResult.kind === 'open' && isRawTextElement(tagResult.tag)) {
       const closeStart = findRawTextClose(text, tagResult.end, tagResult.tag);
       const closeIdx = closeStart >= 0 ? text.indexOf('>', closeStart) : -1;
       pos = closeIdx >= 0 ? closeIdx + 1 : text.length;

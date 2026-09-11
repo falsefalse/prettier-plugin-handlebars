@@ -1,6 +1,6 @@
 import type { AstPath, Doc, ParserOptions, Printer } from 'prettier';
 import { builders, utils } from 'prettier/doc';
-import { voidElements } from './core/html';
+import { isVoidElement } from './core/html';
 import { handlebarsDialect as templateDialect } from './dialects/handlebars/tokens';
 import * as whitespace from './core/whitespace';
 import type {
@@ -354,7 +354,7 @@ function printAttribute(attribute: ElementAttribute, options: PrintOptions): Doc
  * a stray bracket rather than a break.
  */
 function printOpenTag(node: ElementNode, options: PrintOptions): Doc {
-  const marker = node.selfClosing && !voidElements.has(node.tag.toLowerCase()) ? ' />' : '>';
+  const marker = node.selfClosing && !isVoidElement(node.tag) ? ' />' : '>';
 
   if (node.attributes.length === 0) {
     return ['<', node.tag, marker];
