@@ -1,10 +1,9 @@
-import type { AstPath, Doc, ParserOptions, Printer } from 'prettier';
+import type { AstPath, Doc, Printer } from 'prettier';
 import { builders, utils } from 'prettier/doc';
 import { isVoidElement } from './core/html';
 import { handlebarsDialect as templateDialect } from './dialects/handlebars/tokens';
 import * as whitespace from './core/whitespace';
 import type {
-  AttributeValue,
   BlockStatement,
   Call,
   CommentStatement,
@@ -26,13 +25,16 @@ const { removeLines } = utils;
 /* A run of blank lines collapses to one, which is two hardlines. */
 const MAX_HARDLINES = 2;
 
-/** Only prettier's core options reach the printer; this formatter is opinionated. */
-/* Only what the printer actually reads. Width and indentation are the doc printer's business,
- * not ours - listing them here just invited code that reached for them directly. */
-type PrintOptions = Pick<ParserOptions<Node>, 'singleQuote'> & {
+type Quote = '"' | "'";
+
+/* What the printer carries down, none of it from prettier's config: this formatter is
+ * opinionated, and width and indentation are the doc printer's business, not ours. */
+interface PrintOptions {
   /** Quote holding the value being printed into. Unusable by anything nested in it. */
-  enclosingQuote?: '"' | "'";
-};
+  enclosingQuote?: Quote;
+  /** Inside a block in attribute position, where the quote a literal sits in is unreadable. */
+  opaqueQuotes?: boolean;
+}
 
 /** The `~` of `{{~foo~}}`, which strips the whitespace next to the delimiter it sits on. */
 const trim = (marker: boolean | undefined): string => (marker ? '~' : '');
@@ -219,15 +221,17 @@ function contentSpan(pieces: Piece[]): [number, number] {
   return [start, end];
 }
 
-function printExpression(expression: Expression, breakable: boolean): Doc {
-  return expression.type === 'SubExpression' ? printCall(expression, '(', ')', breakable) : expression.source;
+function printExpression(expression: Expression, breakable: boolean, options: PrintOptions): Doc {
+  return expression.type === 'SubExpression'
+    ? printCall(expression, '(', ')', options, breakable)
+    : printSource(expression.source, options);
 }
 
-function printCallParts(call: Call, breakable: boolean): Doc[] {
-  const parts: Doc[] = call.params.map((param) => printExpression(param, breakable));
+function printCallParts(call: Call, breakable: boolean, options: PrintOptions): Doc[] {
+  const parts: Doc[] = call.params.map((param) => printExpression(param, breakable, options));
 
   for (const pair of call.hash) {
-    parts.push([pair.key, '=', printExpression(pair.value, breakable)]);
+    parts.push([pair.key, '=', printExpression(pair.value, breakable, options)]);
   }
 
   if (call.blockParams && call.blockParams.length > 0) {
@@ -238,29 +242,34 @@ function printCallParts(call: Call, breakable: boolean): Doc[] {
 }
 
 /** Whitespace inside a mustache does not render, so it is the formatter's: all-or-nothing. */
-function printCall(call: Call, open: Doc, close: Doc, breakable = true): Doc {
-  const parts = printCallParts(call, breakable);
+function printCall(call: Call, open: Doc, close: Doc, options: PrintOptions, breakable = true): Doc {
+  const parts = printCallParts(call, breakable, options);
   if (parts.length === 0) {
-    return [open, printExpression(call.path, breakable), close];
+    return [open, printExpression(call.path, breakable, options), close];
   }
 
   if (!breakable) {
-    return [open, printExpression(call.path, false), ' ', join(' ', parts), close];
+    return [open, printExpression(call.path, false, options), ' ', join(' ', parts), close];
   }
 
   /* One group, so a call that does not fit breaks every one of its parts. */
-  return group([open, indent([printExpression(call.path, true), line, join(line, parts)]), softline, close]);
+  return group([open, indent([printExpression(call.path, true, options), line, join(line, parts)]), softline, close]);
 }
 
 /* The three inline statements are one call in different delimiters: a mustache in `{{}}` (or
  * `{{{}}}` when unescaped), a partial in `{{> }}`, a decorator in `{{*}}`. */
-function printStatement(node: MustacheStatement | PartialStatement | DecoratorStatement, prefix: string): Doc {
+function printStatement(
+  node: MustacheStatement | PartialStatement | DecoratorStatement,
+  prefix: string,
+  options: PrintOptions,
+): Doc {
   const triple = node.type === 'MustacheStatement' && node.triple;
 
   return printCall(
     node,
     [triple ? '{{{' : '{{', trim(node.trimOpen), prefix],
     [trim(node.trimClose), triple ? '}}}' : '}}'],
+    options,
   );
 }
 
@@ -309,18 +318,54 @@ function printComment(node: CommentStatement): Doc {
   return [open, lead, join(literalline, body.split('\n')), tail, close];
 }
 
-/**
- * The quote that needs no escaping; `singleQuote` decides only when either would do.
- *
- * Against the value's raw text, not just its TextNode parts: a quote inside a mustache is printed
- * too, so `class='{{t "x"}}'` cannot be re-quoted with `"` without ending the attribute early.
- */
-/* A quote ends the value holding it, so a nested element cannot reuse the outer one. */
-function chooseQuote(value: AttributeValue, options: PrintOptions): '"' | "'" {
-  const preferred: '"' | "'" = options.singleQuote === true ? "'" : '"';
-  const candidates: Array<'"' | "'"> = [preferred, preferred === '"' ? "'" : '"'];
+/* Handlebars escapes only the quote that closes the literal: `\n` is a backslash and an `n`,
+ * and `\\` is two backslashes. So unescaping is one replacement and re-escaping is its inverse,
+ * and a value can always be written in either quote. */
+const isQuoted = (source: string): boolean =>
+  source.length >= 2 && (source[0] === '"' || source[0] === "'") && source[source.length - 1] === source[0];
 
-  return candidates.find((q) => q !== options.enclosingQuote && !value.raw.includes(q)) ?? preferred;
+const unquote = (source: string): string => source.slice(1, -1).split(`\\${source[0]}`).join(source[0]);
+
+/* House style: `"` around an attribute value, `'` around a string literal in a mustache. The two
+ * are complementary, so a literal inside an attribute already wears the quote the attribute did
+ * not, and neither has to give way - which is what makes a template read the same throughout.
+ * Both still yield to the quote they sit inside, and to whichever one needs no escaping. */
+const ATTRIBUTE_QUOTE: Quote = '"';
+const LITERAL_QUOTE: Quote = "'";
+
+const otherQuote = (quote: Quote): Quote => (quote === '"' ? "'" : '"');
+
+/**
+ * The house quote, unless the text already holds it or it is the one enclosing this.
+ *
+ * A quote ends the run it opened, so the enclosing one is unusable at any price: `class="{{t
+ * "x"}}"` ends the attribute at the second `"` and the rest of the tag becomes something else.
+ * Text holding the other quote is only worth an escape, and an attribute has none to spend, so
+ * both callers want the quote their text does not hold.
+ */
+function pickQuote(text: string, house: Quote, enclosing?: Quote): Quote {
+  const usable = [house, otherQuote(house)].filter((quote) => quote !== enclosing);
+
+  return usable.find((quote) => !text.includes(quote)) ?? usable[0] ?? house;
+}
+
+/**
+ * A literal or path as it will be printed. A quoted path is a name written as a string -
+ * `{{> 'card'}}` - because the expression reader hands the head back as a path however it was
+ * written, so both go through the same quoting.
+ *
+ * Returns a string rather than a `Doc`: a block's closer has to repeat this exactly, and `Doc`
+ * is not something it can repeat.
+ */
+function printSource(source: string, options: PrintOptions): string {
+  if (!isQuoted(source) || options.opaqueQuotes) {
+    return source;
+  }
+
+  const value = unquote(source);
+  const quote = pickQuote(value, LITERAL_QUOTE, options.enclosingQuote);
+
+  return quote + value.split(quote).join(`\\${quote}`) + quote;
 }
 
 function printAttribute(attribute: ElementAttribute, options: PrintOptions): Doc {
@@ -328,8 +373,11 @@ function printAttribute(attribute: ElementAttribute, options: PrintOptions): Doc
     return attribute.raw;
   }
 
+  /* The block's body is text and mustaches, not attributes: `title="` is half of one TextNode,
+   * so nothing downstream can tell which quote - if any - a literal in there sits inside. The
+   * text keeps the author's quotes because it is content; a literal keeps them for company. */
   if (attribute.type === 'AttributeBlock') {
-    return printAny(attribute.block, options);
+    return printAny(attribute.block, { ...options, opaqueQuotes: true });
   }
 
   if (!attribute.value) {
@@ -341,8 +389,10 @@ function printAttribute(attribute: ElementAttribute, options: PrintOptions): Doc
    * rendered value. The parser marks the value's text as whitespace-significant, which is what
    * keeps a block's body from being laid out at the printer's indent level instead of the
    * author's - and what lets prettier see where the value's own lines end. */
+  /* Against the value's raw text, not just its TextNode parts: a quote inside a mustache is
+   * printed too, so `class='{{t "x"}}'` cannot be re-quoted with `"` without ending early. */
   const { parts } = attribute.value;
-  const quote = chooseQuote(attribute.value, options);
+  const quote = pickQuote(attribute.value.raw, ATTRIBUTE_QUOTE, options.enclosingQuote);
   const nested = { ...options, enclosingQuote: quote };
 
   return [attribute.name, '=', quote, ...parts.map((part) => printAny(part, nested)), quote];
@@ -467,12 +517,18 @@ function printBlock(node: BlockStatement, options: PrintOptions, tail: Doc = [])
     {
       program: node.program,
       open: (breakable) =>
-        printCall(node, ['{{', trim(node.trimOpen), prefix], [trim(node.trimClose), '}}'], breakable),
+        printCall(node, ['{{', trim(node.trimOpen), prefix], [trim(node.trimClose), '}}'], options, breakable),
     },
     ...(node.inverseChain ?? []).map((branch) => ({
       program: branch.program,
       open: (breakable: boolean) =>
-        printCall(branch, ['{{', trim(branch.trimOpen), `${elseKeyword} `], [trim(branch.trimClose), '}}'], breakable),
+        printCall(
+          branch,
+          ['{{', trim(branch.trimOpen), `${elseKeyword} `],
+          [trim(branch.trimClose), '}}'],
+          options,
+          breakable,
+        ),
     })),
   ];
 
@@ -488,7 +544,7 @@ function printBlock(node: BlockStatement, options: PrintOptions, tail: Doc = [])
   const close: Doc = [
     '{{',
     trim(node.closeTrimOpen),
-    templateDialect.getBlockClosePrefix(node.path.source),
+    templateDialect.getBlockClosePrefix(printSource(node.path.source, options)),
     trim(node.closeTrimClose),
     '}}',
     tail,
@@ -590,13 +646,13 @@ function printAny(node: Node, options: PrintOptions): Doc {
       return assemble(textPieces(node));
 
     case 'MustacheStatement':
-      return printStatement(node, '');
+      return printStatement(node, '', options);
 
     case 'PartialStatement':
-      return printStatement(node, '> ');
+      return printStatement(node, '> ', options);
 
     case 'DecoratorStatement':
-      return printStatement(node, '*');
+      return printStatement(node, '*', options);
 
     case 'CommentStatement':
       return printComment(node);
@@ -628,10 +684,12 @@ const visitorKeys: Record<string, string[]> = {
 };
 
 export const printer: Printer<Node> = {
-  /* Only the root reaches this: everything below recurses through printAny. */
-  print(path: AstPath<Node>, options: ParserOptions<Node>): Doc {
+  /* Only the root reaches this: everything below recurses through printAny. Prettier's options
+   * are not among the arguments because nothing here reads them - the quoting is this
+   * formatter's own, and width and indentation belong to the doc printer. */
+  print(path: AstPath<Node>): Doc {
     const node = path.node;
-    return node.type === 'Program' && path.parent === null ? printRoot(node.body, options) : printAny(node, options);
+    return node.type === 'Program' && path.parent === null ? printRoot(node.body, {}) : printAny(node, {});
   },
   getVisitorKeys(node, nonTraversableKeys) {
     const type = typeof node === 'object' && node !== null && 'type' in node ? String(node.type) : '';

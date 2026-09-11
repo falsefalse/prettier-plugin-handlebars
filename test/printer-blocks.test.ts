@@ -21,7 +21,7 @@ describe('one-liners stay one-liners', () => {
     '{{#each xs as |x i|}}<li>{{x}}</li>{{/each}}',
     '{{^cond}}n{{/cond}}',
     '{{#> layout title=t}}<main>{{body}}</main>{{/layout}}',
-    '{{#*inline "badge"}}<span>{{label}}</span>{{/inline}}',
+    "{{#*inline 'badge'}}<span>{{label}}</span>{{/inline}}",
     '{{$body}}x{{/body}}',
     '{{#if a}}{{/if}}',
     '{{~#if a~}}x{{~/if~}}',
@@ -129,7 +129,7 @@ describe('the whole corpus surface', () => {
       '{{#if a}}x{{/if}}',
       '{{^a}}x{{/a}}',
       '{{#> p}}x{{/p}}',
-      '{{#*inline "n"}}x{{/inline}}',
+      "{{#*inline 'n'}}x{{/inline}}",
       '{{$s}}x{{/s}}',
     ];
 

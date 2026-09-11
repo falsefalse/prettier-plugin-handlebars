@@ -3,7 +3,7 @@
 A Prettier plugin for classic Handlebars templates with mixed HTML markup.
 
 It is **opinionated**: it exposes no options of its own, only Prettier's core `printWidth`,
-`tabWidth`, `useTabs` and `singleQuote`. Everything else is a decision the formatter has already
+`tabWidth` and `useTabs`. Everything else is a decision the formatter has already
 made.
 
 ## The rule everything follows
@@ -106,8 +106,21 @@ Or fence the region off entirely. Nothing inside is parsed, so nothing inside ca
 
 ## Options
 
-None. `printWidth`, `tabWidth`, `useTabs` and `singleQuote` are read from Prettier's core config;
-this plugin adds nothing.
+None. `printWidth`, `tabWidth` and `useTabs` are read from Prettier's core config; this plugin
+adds nothing. `singleQuote` is **ignored** - quoting is part of the opinion.
+
+Quotes are `"` around an HTML attribute value and `'` around a string literal in a mustache:
+
+```hbs
+<div class="card" title="{{t 'card.title'}}">{{t 'card.body' count=n}}</div>
+```
+
+The two are complementary, so a literal inside an attribute already wears the quote the attribute
+did not and neither has to give way. Both still yield to the quote they sit inside and to
+whichever one needs no escaping, so `{{t "it's"}}` keeps its double quote. A literal inside a
+block in attribute position, `<img {{#if m}}alt="{{t 'k'}}"{{/if}}>`, keeps the quote the author
+gave it: there the enclosing quote is only half of a text node, so no reader downstream can tell
+what it is.
 
 ## Development
 

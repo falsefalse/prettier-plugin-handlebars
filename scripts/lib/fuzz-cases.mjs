@@ -20,6 +20,14 @@ const atoms = [
   '{{> card title=title data=(lookup . "payload")}}',
   '{{> (lookup . "partialName") data=this}}',
   "{{> 'card' id='0' item=list.[0]}}",
+  /* A quoted block path: the closer has to repeat the opener's quoting, not the author's. */
+  "{{#> 'header'}}<h5>{{title}}</h5>{{/'header'}}",
+  /* Literals the printer cannot re-quote freely: one quote is spelled inside the other, and a
+   * backslash escapes only the quote that encloses it. The padded one guards the value's edges. */
+  `{{t 'it\\'s' u="say \\"hi\\"" v='say "hi"' w="it's"}}`,
+  `{{t 'both \\' and "' m="both ' and \\""}}`,
+  "{{t '  padded  ' n='\\\\n not a newline'}}",
+  `<a title="{{t 'q'}}" data-x='{{t "q"}}'>{{#if (eq k 'v')}}x{{/if}}</a>`,
   '{{*log value level="debug"}}',
   '{{~*log value~}}',
   '{{#> layout title=title}}<main>{{body}}</main>{{/layout}}',
@@ -58,6 +66,9 @@ const atoms = [
   '<{{#if link}}a href="{{href}}"{{else}}div{{/if}} class="box">{{label}}</{{#if link}}a{{else}}div{{/if}}>',
   '<{{ tag }} class="box">{{ value }}</{{ tag }}>',
   '<img {{#if m}}src="d" data-src="{{i}}"{{/if}} alt="{{n}}">',
+  /* In a block in attribute position the quote a literal sits inside is only half of a text
+   * node, so re-quoting it here would end the attribute early. */
+  `<img {{#if m}}title="{{t 'k'}}" data-x='{{t "k"}}'{{/if}} alt="{{n}}">`,
 ];
 
 /* The other half of the contract: input the parser must refuse, with a location. Kept separate
