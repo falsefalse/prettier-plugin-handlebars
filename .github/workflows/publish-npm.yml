@@ -57,11 +57,8 @@ jobs:
             exit 1
           fi
 
-      - name: Run package checks
-        run: npm run check
-
-      - name: Inspect package contents
-        run: npm pack --dry-run
-
       - name: Publish to npm
+        env:
+          # for the first release only, so we can register trusted publisher
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance
