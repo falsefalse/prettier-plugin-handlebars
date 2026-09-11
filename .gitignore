@@ -3,3 +3,6 @@ node_modules
 dist
 reports
 .tmp-npm-cache
+
+# Throwaway probes and repro scripts. Nothing here is ever committed.
+.scratch

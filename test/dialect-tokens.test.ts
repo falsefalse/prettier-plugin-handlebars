@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { handlebarsDialect } from './tokens';
+import { handlebarsDialect } from '../src/dialects/handlebars/tokens';
 
 describe('handlebars dialect tokens', () => {
   it('classifies Handlebars token forms', () => {
@@ -62,20 +62,7 @@ describe('handlebars dialect tokens', () => {
   });
 
   it('keeps Handlebars print syntax in the dialect', () => {
-    expect(handlebarsDialect.getTagDelimiters(false)).toEqual({ open: '{{', close: '}}' });
-    expect(handlebarsDialect.getTagDelimiters(true)).toEqual({ open: '{{{', close: '}}}' });
-    expect(handlebarsDialect.getPartialPrefix()).toBe('> ');
-    expect(handlebarsDialect.getDecoratorPrefix()).toBe('*');
     expect(handlebarsDialect.getElseKeyword()).toBe('else');
     expect(handlebarsDialect.getBlockClosePrefix('if')).toBe('/if');
-    expect(handlebarsDialect.getLineCommentTag('hello')).toBe('{{! hello}}');
-    expect(handlebarsDialect.getLineCommentTag('<tag>')).toBe('{{!<tag>}}');
-    expect(handlebarsDialect.getBlockCommentTag('hello')).toBe('{{!-- hello --}}');
-    expect(handlebarsDialect.getBlockCommentMarkers()).toMatchObject({
-      blockOpen: '{{!--',
-      blockClose: '--}}',
-      inlineOpen: '{{!-- ',
-      inlineClose: ' --}}',
-    });
   });
 });

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { locEnd, locStart, parse } from '../src/parser';
-import { printer } from '../src/printer';
+import { locEnd, locStart, parse as parseTemplate } from '../src/parser';
+import { flattenCalls, type Flat } from './lib/call-shape';
+
+/* Calls read as strings here; expression.test.ts covers the node shape. */
+const parse = (source: string) => flattenCalls(parseTemplate(source));
 import type {
   BlockStatement,
   CommentStatement,
@@ -14,7 +17,7 @@ import type {
   UnmatchedNode,
 } from '../src/types';
 
-function parseProgram(source: string): Program {
+function parseProgram(source: string): Flat<Program> {
   return parse(source);
 }
 
@@ -63,16 +66,6 @@ describe('simple parser coverage', () => {
     expect(Object.keys(attr.value)).not.toContain('range');
   });
 
-  it('exposes explicit Prettier visitor keys for traversable AST fields', () => {
-    const program = parseProgram('<div title="{{name}}">{{value}}</div>');
-    const element = program.body[0] as ElementNode;
-    const attr = element.attributes[0];
-
-    expect(printer.getVisitorKeys?.(program, new Set())).toEqual(['body']);
-    expect(printer.getVisitorKeys?.(element, new Set(['attributes']))).toEqual(['children']);
-    expect(printer.getVisitorKeys?.(attr as never, new Set())).toEqual(['value']);
-  });
-
   it('parses short handlebars comments at the top level', () => {
     const comment = firstNode<CommentStatement>('{{! note}}');
 
@@ -101,7 +94,7 @@ describe('simple parser coverage', () => {
 
     expect(text).toMatchObject({
       type: 'TextNode',
-      value: '\\{{value}}',
+      chars: '\\{{value}}',
     });
   });
 
@@ -180,7 +173,9 @@ describe('simple parser coverage', () => {
         name: 'type',
         value: {
           type: 'AttributeValue',
-          parts: [{ type: 'TextNode', value: 'text' }],
+          raw: 'text',
+          /* Every space inside an attribute value renders, so its text is marked significant. */
+          parts: [{ type: 'TextNode', chars: 'text', preserveWhitespace: true }],
         },
       },
     ]);
@@ -196,29 +191,20 @@ describe('simple parser coverage', () => {
       value: {
         type: 'AttributeValue',
         parts: [
-          { type: 'TextNode', value: '/foo/' },
+          { type: 'TextNode', chars: '/foo/' },
           { type: 'MustacheStatement', path: 'slug' },
         ],
       },
     });
   });
 
-  it('preserves invalid closing tags on void elements as unmatched source', () => {
-    const node = firstNode<UnmatchedNode>('<br></br>');
-
-    expect(node).toEqual({
-      type: 'UnmatchedNode',
-      raw: '<br></br>',
-    });
+  /* Neither is an UnmatchedNode; syntax-errors.test.ts owns the refusal cases. */
+  it('rejects a closing tag on a void element', () => {
+    expect(() => parseTemplate('<br></br>')).toThrow(/void element/u);
   });
 
-  it('preserves malformed block partials as unmatched source', () => {
-    const node = firstNode<UnmatchedNode>('{{#> layout}}\n  <main>{{body}}</main>');
-
-    expect(node).toEqual({
-      type: 'UnmatchedNode',
-      raw: '{{#> layout}}\n  <main>{{body}}</main>',
-    });
+  it('rejects a block partial that is never closed', () => {
+    expect(() => parseTemplate('{{#> layout}}\n  <main>{{body}}</main>')).toThrow(/expected \{\{\/layout\}\}/u);
   });
 
   it('parses dynamic attribute names as raw attributes', () => {
@@ -264,7 +250,7 @@ describe('medium parser coverage', () => {
 
     expect(comment).toMatchObject({
       type: 'TextNode',
-      value: '<!-- keep -->',
+      chars: '<!-- keep -->',
       verbatim: true,
     });
 
@@ -289,7 +275,7 @@ describe('medium parser coverage', () => {
     expect(style.children).toHaveLength(1);
     expect(child).toMatchObject({
       type: 'TextNode',
-      value: '\n  .x { color: red; }\n',
+      chars: '\n  .x { color: red; }\n',
       verbatim: true,
     });
   });

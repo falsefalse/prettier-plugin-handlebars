@@ -1,0 +1,7 @@
+{
+  "extends": "../ts.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": ["."]
+}
