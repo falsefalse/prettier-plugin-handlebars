@@ -280,3 +280,67 @@ describe('coverage', () => {
     await expect(format(everyKind)).resolves.toContain('{{#if a}}');
   });
 });
+
+/* Whitespace inside a mustache is the formatter's, and so is the quote around a literal in one -
+ * neither reaches the page. What the literal holds does reach it, so that is reproduced exactly. */
+describe('string literals inside mustaches', () => {
+  async function expectQuoting(source: string, expected: string): Promise<void> {
+    const first = await format(source);
+    expect(first).toBe(expected);
+    expect(await format(first)).toBe(first);
+  }
+
+  it.each([
+    ['{{t "k"}}', "{{t 'k'}}\n"],
+    ['{{> "card" id="0"}}', "{{> 'card' id='0'}}\n"],
+    ['{{t (concat "a" \'b\')}}', "{{t (concat 'a' 'b')}}\n"],
+  ])('puts a literal in the house quote: %j', async (source, expected) => {
+    await expectQuoting(source, expected);
+  });
+
+  /* The other quote spares an escape, so it wins over the house style. Only a value holding both
+   * has to escape, and then the house quote is as good as the other. */
+  it.each([
+    ["{{t 'it\\'s'}}", '{{t "it\'s"}}\n'],
+    ['{{t "say \\"hi\\""}}', '{{t \'say "hi"\'}}\n'],
+    ['{{t "both \' and \\""}}', "{{t 'both \\' and \"'}}\n"],
+  ])('takes the quote that escapes least in %j', async (source, expected) => {
+    await expectQuoting(source, expected);
+  });
+
+  /* A closer that disagrees with its opener is not a different spelling of the same block - it
+   * is a block Handlebars cannot match, and neither can this parser. */
+  it('quotes a block path the same way at both ends', async () => {
+    await expectQuoting('{{#> "header"}}x{{/"header"}}', "{{#> 'header'}}x{{/'header'}}\n");
+  });
+
+  /* The two house quotes are complementary, so a literal inside an attribute needs no help. It
+   * is only when the attribute's own content forced it off `"` that the literal has to move. */
+  it.each([
+    [`<div title="{{t 'k'}}"></div>`],
+    [`<div title='say "hi" {{t "x"}}'></div>`],
+  ])('never reuses the quote holding it: %j', async (source) => {
+    await expectQuoting(source, `${source}\n`);
+  });
+
+  /* In a block in attribute position `title="` is half of a text node, so nothing downstream can
+   * tell which quote - if any - a literal sits inside. Re-quoting there risks ending the
+   * attribute, and the author's quote already parses. */
+  it('leaves literals inside a block in attribute position', async () => {
+    const source = `<img {{#if m}}title="{{t 'k'}}" data-x='{{t "k"}}'{{/if}}>`;
+    await expectQuoting(source, `${source}\n`);
+  });
+
+  /* `singleQuote` is prettier's, and this printer does not read it. */
+  it('ignores singleQuote', async () => {
+    for (const singleQuote of [true, false]) {
+      const output = await prettier.format('{{t "k"}}', {
+        parser: 'handlebars',
+        plugins: [plugin as never],
+        singleQuote,
+      });
+
+      expect(output).toBe("{{t 'k'}}\n");
+    }
+  });
+});

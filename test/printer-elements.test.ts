@@ -73,14 +73,16 @@ describe('tags', () => {
     await expectStable('<div title=\'He said "hi"\'></div>', '<div title=\'He said "hi"\'></div>\n');
   });
 
-  it('honours singleQuote for attribute values', async () => {
-    const output = await prettier.format('<div title="x"></div>', {
+  /* The house quote is not up for negotiation: `singleQuote` is prettier's, and this printer
+   * does not read it. Asking for the opposite has to change nothing. */
+  it('ignores singleQuote and keeps attribute values double-quoted', async () => {
+    const output = await prettier.format("<div title='x'></div>", {
       parser: 'handlebars',
       plugins: [plugin as never],
       singleQuote: true,
     });
 
-    expect(output).toBe("<div title='x'></div>\n");
+    expect(output).toBe('<div title="x"></div>\n');
   });
 });
 
@@ -272,8 +274,8 @@ describe('partials and decorators', () => {
   it.each([
     ['{{> partials/thing}}', '{{> partials/thing}}\n'],
     ['{{> partials/thing param=1}}', '{{> partials/thing param=1}}\n'],
-    ['{{> (lookup . "name") data=this}}', '{{> (lookup . "name") data=this}}\n'],
-    ['{{*inline "x"}}', '{{*inline "x"}}\n'],
+    ["{{> (lookup . 'name') data=this}}", "{{> (lookup . 'name') data=this}}\n"],
+    ["{{*inline 'x'}}", "{{*inline 'x'}}\n"],
     ['{{~*log value~}}', '{{~*log value~}}\n'],
   ])('%j', async (source, expected) => {
     await expectStable(source, expected);
@@ -285,8 +287,8 @@ describe('recovery', () => {
    * for a matching close tag did not, so the `<div>` inside a string literal was counted as an
    * open tag and the real `</div>` went to closing it. */
   it.each([
-    ['<div>{{t "<div>"}}</div>', '<div>{{t "<div>"}}</div>\n'],
-    ['<p>{{t "a<b"}}</p>', '<p>{{t "a<b"}}</p>\n'],
+    ["<div>{{t '<div>'}}</div>", "<div>{{t '<div>'}}</div>\n"],
+    ["<p>{{t 'a<b'}}</p>", "<p>{{t 'a<b'}}</p>\n"],
     ['<div>{{{{raw}}}}</div>{{{{/raw}}}}</div>', '<div>{{{{raw}}}}</div>{{{{/raw}}}}</div>\n'],
   ])('does not read a `<` inside a mustache as markup: %j', async (source, expected) => {
     await expectStable(source, expected);

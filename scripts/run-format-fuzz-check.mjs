@@ -3,7 +3,9 @@
  * quietly formatted into something the author did not write. */
 import prettier from 'prettier';
 import * as plugin from '../dist/plugin.js';
-import { TemplateSyntaxError } from '../dist/errors.js';
+import { TemplateSyntaxError } from '../dist/core/errors.js';
+import { parse } from '../dist/parser.js';
+import { literalValues } from '../test/lib/ast-invariants.mts';
 import { renderDifference } from '../test/lib/render.mts';
 import { fuzzCasesFromEnv, malformed } from './lib/fuzz-cases.mjs';
 
@@ -33,6 +35,15 @@ for (const testCase of cases) {
         firstPass,
         secondPass,
       });
+    }
+
+    /* Re-quoting a literal must not change what it holds. Rendering misses this whenever the
+     * value never reaches the page - a partial name, a helper the harness has no binding for. */
+    const before = literalValues(parse(testCase.source));
+    const after = literalValues(parse(firstPass));
+
+    if (before.join('\u0000') !== after.join('\u0000')) {
+      failures.push({ id: testCase.id, type: 'literal-changed', source: testCase.source, firstPass, before, after });
     }
 
     /* Content changes only: the generator emits one-line soup that has to wrap, so a sibling
@@ -92,6 +103,13 @@ if (failures.length > 0) {
 
     if (failure.type === 'crash' || failure.type === 'accepted') {
       console.error(failure.error);
+      return;
+    }
+
+    if (failure.type === 'literal-changed') {
+      console.error('--- literals ---');
+      console.error(JSON.stringify(failure.before));
+      console.error(JSON.stringify(failure.after));
       return;
     }
 

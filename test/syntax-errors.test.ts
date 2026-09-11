@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import prettier from 'prettier';
 import { parse } from '../src/parser';
-import { TemplateSyntaxError } from '../src/errors';
+import { TemplateSyntaxError } from '../src/core/errors';
 import * as plugin from '../src/plugin';
 
 function failure(source: string): TemplateSyntaxError {
@@ -110,8 +110,8 @@ describe('malformed templates are rejected', () => {
   it.each([
     ['a block opened inside a raw block', '{{#if a}}{{{{raw}}}}{{#if b}}{{{{/raw}}}}{{/if}}'],
     ['a block closed inside a raw block', '{{#each xs}}{{{{raw}}}}{{/each}}{{{{/raw}}}}{{/each}}'],
-    ['an open delimiter in a string literal', '{{#if (eq a "{{")}}x{{/if}}'],
-    ['a close delimiter in a string literal', '{{#if (eq a "}}")}}x{{/if}}'],
+    ['an open delimiter in a string literal', "{{#if (eq a '{{')}}x{{/if}}"],
+    ['a close delimiter in a string literal', "{{#if (eq a '}}')}}x{{/if}}"],
   ])('accepts %s', async (_name, source) => {
     expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] })).toBe(`${source}\n`);
   });

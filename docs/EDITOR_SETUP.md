@@ -7,7 +7,6 @@ The plugin works through Prettier. Editors must be configured so Prettier is sel
 Install:
 
 - [Prettier - Code formatter](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode)
-- Optional companion extension: [HBS Master](https://marketplace.visualstudio.com/items?itemName=poliklot.hbs-master)
 
 Recommended workspace settings:
 

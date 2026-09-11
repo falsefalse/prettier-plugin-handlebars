@@ -1,4 +1,5 @@
-import { locEnd, locStart, parse } from './parser';
+import { locEnd, locStart } from './core/source';
+import { parse } from './parser';
 import { printer } from './printer';
 
 export const languages = [

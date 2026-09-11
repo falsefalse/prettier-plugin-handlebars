@@ -45,8 +45,8 @@
   ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "npm run clean && tsc -p tsconfig.json",
-    "typecheck": "tsc --noEmit -p ./ts.base.json",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "typecheck": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
     "check": "npm run build && npm run typecheck && npm test && npm run gates",
@@ -67,8 +67,5 @@
   },
   "peerDependencies": {
     "prettier": ">=3.0.0"
-  },
-  "dependencies": {
-    "template-format-core": "^0.1.1"
   }
 }

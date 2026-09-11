@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { locEnd, locStart, parse as parseTemplate } from '../src/parser';
+import { locEnd, locStart } from '../src/core/source';
+import { parse as parseTemplate } from '../src/parser';
 import { flattenCalls, type Flat } from './lib/call-shape';
 
 /* Calls read as strings here; expression.test.ts covers the node shape. */
