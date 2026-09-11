@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { locEnd, locStart, parse } from '../src/parser';
+import { locEnd, locStart, parse as parseTemplate } from '../src/parser';
+import { flattenCalls } from './call-shape';
+
+/* Calls read as strings here; expression.test.ts covers the node shape. */
+const parse = (source: string) => flattenCalls(parseTemplate(source));
 import type {
   BlockStatement,
   CommentStatement,
@@ -90,7 +94,7 @@ describe('simple parser coverage', () => {
 
     expect(text).toMatchObject({
       type: 'TextNode',
-      value: '\\{{value}}',
+      chars: '\\{{value}}',
     });
   });
 
@@ -169,7 +173,7 @@ describe('simple parser coverage', () => {
         name: 'type',
         value: {
           type: 'AttributeValue',
-          parts: [{ type: 'TextNode', value: 'text' }],
+          parts: [{ type: 'TextNode', chars: 'text' }],
         },
       },
     ]);
@@ -185,7 +189,7 @@ describe('simple parser coverage', () => {
       value: {
         type: 'AttributeValue',
         parts: [
-          { type: 'TextNode', value: '/foo/' },
+          { type: 'TextNode', chars: '/foo/' },
           { type: 'MustacheStatement', path: 'slug' },
         ],
       },
@@ -253,7 +257,7 @@ describe('medium parser coverage', () => {
 
     expect(comment).toMatchObject({
       type: 'TextNode',
-      value: '<!-- keep -->',
+      chars: '<!-- keep -->',
       verbatim: true,
     });
 
@@ -278,7 +282,7 @@ describe('medium parser coverage', () => {
     expect(style.children).toHaveLength(1);
     expect(child).toMatchObject({
       type: 'TextNode',
-      value: '\n  .x { color: red; }\n',
+      chars: '\n  .x { color: red; }\n',
       verbatim: true,
     });
   });

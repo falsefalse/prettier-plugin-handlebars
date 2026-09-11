@@ -1,12 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { parse } from './parser';
+import { parse as parseTemplate } from './parser';
+import { flattenCalls } from '../test/call-shape';
+
+/* Calls read as strings here; expression.test.ts covers the node shape. */
+const parse = (source: string) => flattenCalls(parseTemplate(source));
+
+/* The parser keeps every whitespace run, so a template written across lines starts with one.
+ * These tests are about structure, not indentation. */
+const isWhitespace = (node) => node.type === 'TextNode' && node.chars.trim() === '';
+const significant = (nodes) => nodes.filter((node) => !isWhitespace(node));
 
 function firstElement(ast) {
   expect(ast).toBeDefined();
   expect(ast.type).toBe('Program');
-  expect(ast.body[0]).toBeDefined();
-  expect(ast.body[0].type).toBe('ElementNode');
-  return ast.body[0];
+
+  const first = significant(ast.body)[0];
+  expect(first).toBeDefined();
+  expect(first.type).toBe('ElementNode');
+  return first;
 }
 
 describe('HTML Elements', () => {
@@ -39,7 +50,7 @@ describe('HTML Elements', () => {
     expect(el.children).toEqual([
       expect.objectContaining({
         type: 'TextNode',
-        value: 'text'
+        chars: 'text'
       })
     ]);
   });
@@ -57,7 +68,7 @@ describe('HTML Elements', () => {
     // Структура: TextNode "text", ElementNode br, TextNode "text"
     expect(el.children[0]).toMatchObject({
       type: 'TextNode',
-      value: 'text'
+      chars: 'text'
     });
 
     expect(el.children[1]).toMatchObject({
@@ -70,7 +81,7 @@ describe('HTML Elements', () => {
 
     expect(el.children[2]).toMatchObject({
       type: 'TextNode',
-      value: 'text'
+      chars: 'text'
     });
   });
 });
@@ -246,7 +257,7 @@ describe('Mustache in HTML attributes', () => {
     expect(dataAttr.value.parts).toEqual([
       expect.objectContaining({
         type: 'TextNode',
-        value: 'value'
+        chars: 'value'
       })
     ]);
 
@@ -283,18 +294,18 @@ describe('Mustache blocks in children', () => {
       blockPrefix: '<'
     });
 
-    expect(parent.program.body[0]).toMatchObject({
+    expect(significant(parent.program.body)[0]).toMatchObject({
       type: 'BlockStatement',
       path: 'title',
       blockPrefix: '$',
       program: expect.objectContaining({
         type: 'Program',
-        body: [
+        body: expect.arrayContaining([
           expect.objectContaining({
             type: 'TextNode',
-            value: 'Hello'
+            chars: 'Hello'
           })
-        ]
+        ])
       })
     });
   });
@@ -319,18 +330,18 @@ describe('Mustache blocks in children', () => {
       blockPrefix: '<'
     });
 
-    expect(parent.program.body[0]).toMatchObject({
+    expect(significant(parent.program.body)[0]).toMatchObject({
       type: 'BlockStatement',
       path: 'drawercontent',
       blockPrefix: '$',
       program: expect.objectContaining({
-        body: [
+        body: expect.arrayContaining([
           expect.objectContaining({
             type: 'MustacheStatement',
             path: 'content',
             triple: true
           })
-        ]
+        ])
       })
     });
   });
@@ -346,13 +357,13 @@ describe('Mustache blocks in children', () => {
       path: '*dynamic',
       blockPrefix: '<',
       program: expect.objectContaining({
-        body: [
+        body: expect.arrayContaining([
           expect.objectContaining({
             type: 'BlockStatement',
             path: 'text',
             blockPrefix: '$'
           })
-        ]
+        ])
       })
     });
   });
@@ -427,7 +438,7 @@ describe('Mustache blocks in children', () => {
       inverse: expect.objectContaining({ type: 'Program' })
     });
 
-    expect(ifBlock.inverse.body.some(node => node.type === 'TextNode' && node.value.includes('four'))).toBe(true);
+    expect(ifBlock.inverse.body.some(node => node.type === 'TextNode' && node.chars.includes('four'))).toBe(true);
   });
 
   it('keeps quoted comparison operators as positional params', () => {

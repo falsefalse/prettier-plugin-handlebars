@@ -1,6 +1,6 @@
 # Printer rewrite plan
 
-Status: proposed. Target branch: `feat/printer-v2`, cut from the tip of `master`.
+Status: in progress (phases 0-3 done). Branch: `feat/printer-v2`, cut from the tip of `master`.
 `feat/style-options` stays as the record of what not to do.
 
 ## 1. What went wrong, precisely
@@ -127,16 +127,36 @@ Today `params: string[]` and `hash: { key, value }[]` are opaque strings, so
 `x=(concat 'b' (upper c))` is one atom that can never break. That defeats "respect line length
 always".
 
-```ts
-type Expression =
-  | PathExpression       // foo.bar, ../x, this.y, @index, a.[b c]
-  | StringLiteral | NumberLiteral | BooleanLiteral | NullLiteral | UndefinedLiteral
-  | SubExpression;       // (helper p1 p2 k=v) — recursive, therefore breakable
+Handlebars' own AST cannot be mirrored, because it is lossy in exactly the ways a formatter
+cannot afford: `a.[b c].d` reconstructs to `a.b c.d`, `'x'` loses its quote character, `1.50`
+becomes `1.5`. So every node carries its own `source` and prints from it. **Structure decides
+where to break; it never rewrites what the author wrote.** The single exception is string quotes,
+which `singleQuote` governs.
 
-interface CallNode { path: PathExpression; params: Expression[]; hash: HashPair[]; }
+```ts
+type Expression = PathExpression | Literal | SubExpression;
+
+interface PathExpression extends SourceRange { type: 'PathExpression'; source: string }
+interface Literal extends SourceRange {
+  type: 'StringLiteral' | 'NumberLiteral' | 'BooleanLiteral' | 'NullLiteral' | 'UndefinedLiteral';
+  source: string;
+}
+interface SubExpression extends SourceRange {
+  type: 'SubExpression';
+  source: string;
+  path: PathExpression | SubExpression;
+  params: Expression[];
+  hash: HashPair[];
+}
+interface HashPair extends SourceRange { key: string; value: Expression }
 ```
 
-The Handlebars expression grammar is small; this is a contained tokenizer, not a rewrite.
+`MustacheBase.path` is `PathExpression | SubExpression`. A subexpression head is only reachable
+through a dynamic partial — `{{(a b) c}}` and `{{#(a b)}}` are both parse errors in Handlebars,
+so the union stays narrow.
+
+The reader is total: anything it cannot classify becomes a `PathExpression` holding the raw text,
+because the formatter has to keep working on templates that are mid-edit.
 
 ## 5. Printer design
 
@@ -199,7 +219,10 @@ the target repo stays small:
 
 Five properties, run over the fuzz generator **and** a real template corpus, not per-case:
 
-1. **Parser round-trip** — leaves concatenated == source, byte exact. Catches parser data loss.
+1. **Parser tiling** — every child list tiles its container's span, no gaps, no overlaps. Catches
+   dropped whitespace directly. Tiling stops at a call's edge, where whitespace belongs to the
+   formatter; there the weaker check is that parts stay inside the call, ordered and
+   non-overlapping.
 2. **Render equivalence** — `render(format(src), data) === render(src, data)` using real
    Handlebars. `test/semantic-render.test.ts` already does this; it becomes the primary gate.
 3. **Width** — no output line exceeds `printWidth` unless it is one unbreakable token
@@ -251,15 +274,15 @@ come up quickly.
 |---|---|---|---|
 | 0 | Branch. Split the fuzz *generator* out of `run-fuzz-check.mjs` so it can drive a parser-only property. Record current corpus numbers. | — | generator is importable; baseline recorded |
 | 1 | **Delete** `src/printer.ts`, its tests, the nine options and their plumbing. | deleted with their code | repo builds; `parse` and `src/parser.test.ts` still green; plugin cannot format |
-| 2 | Parser: verbatim whitespace text nodes, in place. | `src/parser.test.ts` rewritten in the same commit | round-trip property (leaves == source, byte exact) passes on fuzz and every corpus file |
-| 3 | Parser: structured expressions, subexpressions as real nodes. | parser tests extended in the same commit | round-trip still byte exact; expression table covered |
+| 2 | Parser: verbatim whitespace text nodes, in place. | `src/parser.test.ts` rewritten in the same commit | tiling property passes on every fuzz case and every corpus file |
+| 3 | Parser: structured expressions, subexpressions as real nodes. | parser tests extended in the same commit | tiling still clean; containment holds; literal and recovery tables covered |
 | 4 | Printer: program, text, mustache, comment. Throws on anything else. | new suite, written against the new shape | coverage report shows N/M formattable; those N pass all five properties; **first corpus diff read by eye** |
 | 5 | Printer: elements and attributes. | extends phase 4 suite | N grows; single tag group verified against the `perk.hbs` shape; diff read |
 | 6 | Printer: blocks, partials, decorators, else-chains, raw blocks. | syntax-coverage table | every corpus file formattable; full syntax table green; diff read |
 | 7 | Differential against `prettier-hbs` on the corpus. | — | every divergence listed and justified as deliberate |
 | 8 | Corpus migration, chunked by directory. | — | each chunk reviewed by eye before the next |
 
-Phases 2 and 3 are load-bearing. If the round-trip property holds, most of the printer's
+Phases 2 and 3 are load-bearing. If the tiling property holds, most of the printer's
 difficulty evaporates.
 
 ## 9. Risks

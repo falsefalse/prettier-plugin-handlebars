@@ -52,26 +52,63 @@ export interface ElementNode extends SourceRange {
   attributes: ElementAttribute[];
   children: Node[];
   selfClosing: boolean;
+  /** Span between the open tag's `>` and the close tag's `<`, so children can be checked to tile it. */
+  contentRange?: [number, number];
 }
 
 export interface TextNode extends SourceRange {
   type: 'TextNode';
-  value: string;
-  blankLines?: number;
+  /** The source run, verbatim. Whitespace is content, never metadata. */
+  chars: string;
+  /** Content copied through untouched: raw-text elements, prettier-ignore regions. */
   verbatim?: boolean;
   preserveWhitespace?: boolean;
-  leadingWhitespace?: string;
-  trailingWhitespace?: string;
 }
 
-export interface HashPair {
+/* Expressions print from their own `source`, never from a reconstructed value: Handlebars' own
+ * AST loses the brackets in `a.[b c].d`, the quote character in `'x'` and the trailing zero in
+ * `1.50`, all of which a formatter has to reproduce exactly. Structure exists to decide where to
+ * break, not to rewrite what the author wrote. */
+export type Expression = PathExpression | Literal | SubExpression;
+
+export type LiteralType =
+  | 'StringLiteral'
+  | 'NumberLiteral'
+  | 'BooleanLiteral'
+  | 'NullLiteral'
+  | 'UndefinedLiteral';
+
+export interface PathExpression extends SourceRange {
+  type: 'PathExpression';
+  /** `a.[b c].d`, `../../x`, `@index`, `this`, exactly as written. */
+  source: string;
+}
+
+export interface Literal extends SourceRange {
+  type: LiteralType;
+  /** Exactly as written, quotes included. */
+  source: string;
+}
+
+export interface SubExpression extends SourceRange {
+  type: 'SubExpression';
+  /** `(concat 'p' x)` including the parens, so every expression node prints from itself. */
+  source: string;
+  path: PathExpression | SubExpression;
+  params: Expression[];
+  hash: HashPair[];
+}
+
+export interface HashPair extends SourceRange {
+  /** Always a bare identifier: Handlebars rejects `a.b=1`. */
   key: string;
-  value: string;
+  value: Expression;
 }
 
 export interface MustacheBase {
-  path: string;
-  params: string[];
+  /** A SubExpression head is only reachable through a dynamic partial, `{{> (lookup . "n")}}`. */
+  path: PathExpression | SubExpression;
+  params: Expression[];
   hash: HashPair[];
   blockParams?: string[];
   trimOpen?: boolean;
