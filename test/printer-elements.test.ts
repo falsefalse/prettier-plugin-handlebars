@@ -111,9 +111,3 @@ describe('recovery', () => {
     await expectStable('{{#> layout}}\n  <main>{{body}}</main>', '{{#> layout}}\n  <main>{{body}}</main>\n');
   });
 });
-
-describe('coverage boundary', () => {
-  it('still reports blocks as unhandled', async () => {
-    await expect(format('{{#if a}}x{{/if}}')).rejects.toThrow(/does not handle BlockStatement yet/);
-  });
-});

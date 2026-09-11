@@ -100,25 +100,66 @@ describe('comments', () => {
     await expectStable(source, expected);
   });
 
-  /* Padding a multi-line body puts trailing whitespace on the opening line, which re-parses
-   * differently on the next pass. */
-  it('leaves a multi-line body exactly as written', async () => {
+  /* Padding regardless puts trailing whitespace on the opening line of a multi-line body,
+   * which re-parses differently on the next pass. */
+  it('pads a multi-line body only where it is not already spaced', async () => {
+    await expectStable('{{! one\n  two }}', '{{!-- one\n  two --}}\n');
     await expectStable('{{!--\n  <span>x</span>\n--}}', '{{!--\n  <span>x</span>\n--}}\n');
+  });
+
+  it('lands the closer under the opener when the body ends on its own line', async () => {
+    const output = await format('<p>\n  {{!\n    note\n  }}\n</p>');
+
+    expect(output).toBe('<p>\n  {{!--\n    note\n  --}}\n</p>\n');
+  });
+
+  /* A body written on its own line follows the surrounding structure rather than staying
+   * frozen at the column it was first typed at. */
+  it('re-indents a body that starts on its own line', async () => {
+    await expectStable(
+      '<div>\n  <p>\n    {{!\n  under-indented\n    }}\n  </p>\n</div>',
+      '<div>\n  <p>\n    {{!--\n      under-indented\n    --}}\n  </p>\n</div>\n',
+    );
+  });
+
+  it('keeps the body\'s relative shape while re-indenting', async () => {
+    const output = await format('{{!\n  outer\n    nested\n  outer again\n}}');
+
+    expect(output).toBe('{{!--\n  outer\n    nested\n  outer again\n--}}\n');
+  });
+
+  it('leaves a hanging body alone, having nothing to hang from', async () => {
+    await expectStable('{{! one\n  two }}', '{{!-- one\n  two --}}\n');
+  });
+
+  it.each(['{{!--\n--}}', '{{!--\n  a\n\n  b\n--}}'])('survives an odd body: %j', async (source) => {
+    await expectStable(source, `${source}\n`);
   });
 });
 
 describe('prose', () => {
-  it('wraps long text at printWidth without changing whitespace count', async () => {
+  it('wraps a long single line at printWidth, word by word', async () => {
     const source = 'one two three four five six seven eight nine ten eleven twelve';
     const output = await format(source, 20);
 
     expect(output.split('\n').filter(Boolean).length).toBeGreaterThan(1);
     expect(output.trim().split(/\s+/)).toEqual(source.split(' '));
   });
+
+  /* The rule does not stop at node boundaries: a newline the author wrote inside a text run is
+   * the same newline as one between two nodes. Treating them differently made layout depend on
+   * where the parser happened to split, which is how attributes written one-per-line inside an
+   * attribute-position block came back joined. */
+  it('keeps a newline inside a text run', async () => {
+    await expectStable('<p>\n  First sentence.\n  Second sentence.\n</p>', '<p>\n  First sentence.\n  Second sentence.\n</p>\n');
+  });
 });
 
-describe('coverage boundary', () => {
-  it('reports what it cannot print yet', async () => {
-    await expect(format('{{#if a}}x{{/if}}')).rejects.toThrow(/does not handle BlockStatement yet/);
+describe('coverage', () => {
+  it('handles every node type the parser produces', async () => {
+    const everyKind =
+      '{{! c }}{{v}}{{{r}}}{{> p}}{{*d}}<div a="1">t</div>{{#if a}}x{{else}}y{{/if}}{{{{raw}}}}z{{{{/raw}}}}';
+
+    await expect(format(everyKind)).resolves.toContain('{{#if a}}');
   });
 });
