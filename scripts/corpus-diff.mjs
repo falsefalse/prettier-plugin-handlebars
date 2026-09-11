@@ -1,7 +1,5 @@
-/* Prints what the formatter would do to a corpus, for reading by eye.
- *
- * The property gates prove correctness; they cannot see bad taste, which is the failure mode
- * that actually matters here. Every printer phase ends with someone reading this output.
+/* Prints what the formatter would do to a corpus, for reading by eye. The property gates prove
+ * correctness; they cannot see bad taste, which is the failure mode that matters here.
  *
  * Usage:
  *   node scripts/corpus-diff.mjs --repo ../some-app --path app/templates
@@ -15,35 +13,27 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import prettier from 'prettier';
+import { die, positiveInt, readArgv } from './lib/argv.mjs';
 import * as plugin from '../dist/plugin.js';
 
-const argv = process.argv.slice(2);
-const flag = (name) => argv.includes(name);
+const { values } = readArgv(process.argv.slice(2), {
+  repo: { type: 'string' },
+  path: { type: 'string' },
+  only: { type: 'string' },
+  width: { type: 'string' },
+  limit: { type: 'string' },
+  stat: { type: 'boolean' },
+});
 
-const die = (message) => {
-  console.error(message);
-  process.exit(1);
-};
-
-/* A flag is not a value: `--repo --stat` would otherwise take `--stat` as the repo path. */
-const valueOf = (name, fallback) => {
-  const at = argv.indexOf(name);
-  if (at === -1) return fallback;
-
-  const value = argv[at + 1];
-  if (value === undefined || value.startsWith('--')) die(`${name} needs a value.`);
-  return value;
-};
-
-const repo = valueOf('--repo', '') || die('--repo <path to a repo holding .hbs templates> is required.');
-const pathspec = valueOf('--path', '') || die('--path <pathspec within the repo> is required.');
-const printWidth = Number.parseInt(valueOf('--width', '95'), 10);
-const only = valueOf('--only', '');
-const limit = Number.parseInt(valueOf('--limit', '0'), 10) || Infinity;
-const statOnly = flag('--stat');
+const repo = values.repo ?? die('--repo <path to a repo holding .hbs templates> is required.');
+const pathspec = values.path ?? die('--path <pathspec within the repo> is required.');
+const printWidth = positiveInt('--width', values.width) ?? 95;
+const only = values.only ?? '';
+const limit = positiveInt('--limit', values.limit) ?? Infinity;
+const statOnly = values.stat === true;
 
 /* Read at HEAD, never from the working tree: the corpus may be mid-review. */
-const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', maxBuffer: 1 << 28 });
+const git = (...command) => execFileSync('git', ['-C', repo, ...command], { encoding: 'utf8', maxBuffer: 1 << 28 });
 
 const files = git('ls-files', pathspec)
   .trim()

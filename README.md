@@ -124,7 +124,7 @@ must be refused with a location.
 `scripts/run-property-gate.mjs` checks the same properties over a real corpus:
 
 ```bash
-node scripts/run-property-gate.mjs --git ../your-repo --width 95 path/to/templates
+npm run corpus:gate -- --git ../your-repo --width 95 path/to/templates
 ```
 
 The last gate is a person reading the diff the formatter would produce. The property gates prove

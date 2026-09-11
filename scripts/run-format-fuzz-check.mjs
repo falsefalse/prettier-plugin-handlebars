@@ -1,12 +1,11 @@
 /* Properties over the shared fuzz corpus: formatting never crashes, is idempotent, and does not
- * change what the template renders. And the other way round for the malformed corpus, which must
- * be refused with a location rather than quietly formatted into something the author did not
- * write. */
+ * change what the template renders. The malformed corpus must be refused with a location, not
+ * quietly formatted into something the author did not write. */
 import prettier from 'prettier';
 import * as plugin from '../dist/plugin.js';
 import { TemplateSyntaxError } from '../dist/errors.js';
 import { renderDifference } from '../test/lib/render.mts';
-import { fuzzCasesFromEnv, malformed } from './fuzz-cases.mjs';
+import { fuzzCasesFromEnv, malformed } from './lib/fuzz-cases.mjs';
 
 const { cases, seed } = fuzzCasesFromEnv();
 const failures = [];
@@ -36,13 +35,11 @@ for (const testCase of cases) {
       });
     }
 
-    /* Only content changes. The generator emits one-line soup that has to wrap, and a space
-     * between siblings becoming a newline is a layout change a browser cannot see - the corpus
-     * gate watches that separately, over files where staying at zero means something. */
+    /* Content changes only: the generator emits one-line soup that has to wrap, so a sibling
+     * gap turning into a newline is expected here. The corpus gate watches that separately. */
     const difference = renderDifference(testCase.source, firstPass);
 
-    /* A case the harness cannot render is a case this gate did not check. Counting it as a pass
-     * is how the render property quietly stopped covering 30% of the corpus. */
+    /* A case the harness cannot render is a case this gate did not check, not a pass. */
     if (difference?.kind === 'unrenderable') {
       failures.push({ id: testCase.id, type: 'unrenderable', source: testCase.source });
     } else {
@@ -114,8 +111,8 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-/* Say how much was actually render-compared, not just how much was formatted. A gate that
- * cannot report its own coverage can become vacuous without anyone noticing. */
+/* Report what was render-compared, not just what was formatted: a gate that cannot measure its
+ * own coverage goes vacuous unnoticed. */
 console.log(
   `Format fuzz check passed: ${cases.length} formatted, ${renderCompared} render-compared, ` +
     `${malformed.length} refused, seed=${seed}.`,

@@ -224,7 +224,7 @@ Five properties, run over the fuzz generator **and** a real template corpus, not
    formatter; there the weaker check is that parts stay inside the call, ordered and
    non-overlapping.
 2. **Render equivalence** — `render(format(src), data) === render(src, data)` using real
-   Handlebars, via `scripts/render.mjs`. The primary gate. It splits its verdict in two: a
+   Handlebars, via `test/lib/render.mts`. The primary gate. It splits its verdict in two: a
    *content* change (something moved on the page) and a *whitespace-amount* change (the same
    content, a different amount of space between it). Both are held at zero on the corpus.
 3. **Width** — no output line exceeds `printWidth` unless it is one unbreakable token
@@ -364,7 +364,7 @@ compiled source *and* output with the real Handlebars runtime and asserted the r
 a property with no replacement, since idempotence, no-crash and tiling cannot see a changed
 render. Four defects walked straight through the gap.
 
-**The gate.** `scripts/render.mjs` renders a template twice - once with every conditional taking
+**The gate.** `test/lib/render.mts` renders a template twice - once with every conditional taking
 its main branch, once the inverse - with unknown helpers and partials resolving to markers, so
 rendering is total over arbitrary input and the fuzz corpus can drive it. Both fuzz gates and the
 property gate now use it; the property gate's regex approximation of "rendered text" is gone.

@@ -1,5 +1,6 @@
 /* Deterministic Handlebars source generator, shared by every fuzz-driven property check.
  * Kept free of prettier and plugin imports so parser-only properties can use it too. */
+import { die } from './argv.mjs';
 
 export const DEFAULT_SEED = 20260429;
 export const DEFAULT_CASE_COUNT = 400;
@@ -8,9 +9,8 @@ export const DEFAULT_CASE_COUNT = 400;
  * never lost, formatting is idempotent - only mean something over input the parser accepts. */
 const atoms = [
   'Hello, {{name}}!',
-  /* A quote in a line comment can run the token past its real `}}`, pulling what follows into
-   * the comment: valid input, stable across passes, and the page renders nothing. Only a render
-   * comparison catches it. */
+  /* A quote in a line comment can run the token past its real `}}`, swallowing what follows.
+   * Valid and stable across passes, so only a render comparison catches it. */
   '{{! "q }}\n{{#if a}}y{{/if}}',
   '{{ value }}',
   '{{~ value ~}}',
@@ -83,10 +83,9 @@ export const malformed = [
   '{{!-- x',
 ];
 
-/* Bodies come in indented, the way a template is actually written. Feeding un-indented children
- * to a container instead exercises one known limitation - see docs/REWRITE-PLAN.md 9, "indentation
- * after a standalone partial" - which `printer-core.test.ts` pins directly rather than having it
- * turn up in a third of the generated cases. */
+/* Bodies come in indented, the way a template is actually written. Un-indented ones would hit
+ * the known limitation `printer-core.test.ts` already pins - docs/REWRITE-PLAN.md 9, "indentation
+ * after a standalone partial" - in a third of the generated cases. */
 const indented = (body) =>
   body
     .split('\n')
@@ -118,10 +117,8 @@ export function generateFuzzCases({ count = DEFAULT_CASE_COUNT, seed = DEFAULT_S
     const separator = pick(['', ' ', '\n', '\n\n']);
     const pieces = [];
 
-    /* Padding a piece that starts a line would indent it out of step with its neighbours, which
-     * is the same known limitation `indented` avoids: the formatter re-indents, and the line
-     * after a standalone statement has its indentation rendered. Off a line start it is just
-     * whitespace between siblings, which is exactly what wants fuzzing. */
+    /* Padding a line start is indentation, which runs into the limitation `indented` avoids.
+     * Off a line start it is a sibling gap, which is what wants fuzzing. */
     const pad = separator.includes('\n') ? () => '' : () => maybe('  ', 0.2);
 
     for (let pieceIndex = 0; pieceIndex < pieceCount; pieceIndex += 1) {
@@ -142,17 +139,12 @@ export function generateFuzzCases({ count = DEFAULT_CASE_COUNT, seed = DEFAULT_S
 /** Reads the shared `HBS_FUZZ_*` overrides so every property check is tuned the same way. */
 export function fuzzCasesFromEnv(env = process.env, argv = process.argv.slice(2)) {
   /* Neither runner takes arguments, and an ignored one is worse than a rejected one: `--seed 3`
-   * runs the default seed and prints it, so a sweep intended to cover six seeds can be one seed
-   * six times without ever saying so. */
-  if (argv.length > 0) {
-    console.error(`unexpected argument ${argv[0]}: configure with HBS_FUZZ_SEED and HBS_FUZZ_CASES.`);
-    process.exit(1);
-  }
+   * silently runs the default seed, so a six-seed sweep can be one seed six times. */
+  if (argv.length > 0) die(`unexpected argument ${argv[0]}: configure with HBS_FUZZ_SEED and HBS_FUZZ_CASES.`);
 
   const count = Number.parseInt(env.HBS_FUZZ_CASES ?? String(DEFAULT_CASE_COUNT), 10);
-  /* Guarded the way `count` is: `HBS_FUZZ_SEED=abc` parsed to NaN, `seed >>> 0` turned it into
-   * seed 0, and the run logged `seed=NaN` - so the log line stopped being a usable record of
-   * what produced it. */
+  /* A NaN seed becomes 0 at `seed >>> 0` and logs as `seed=NaN`, so the log line stops
+   * identifying the run it came from. */
   const parsedSeed = Number.parseInt(env.HBS_FUZZ_SEED ?? String(DEFAULT_SEED), 10);
   const seed = Number.isFinite(parsedSeed) ? parsedSeed : DEFAULT_SEED;
 

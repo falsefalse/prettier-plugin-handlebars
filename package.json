@@ -55,7 +55,8 @@
     "prepublishOnly": "npm run check",
     "fuzz:format": "npm run build && node scripts/run-format-fuzz-check.mjs",
     "fuzz:parser": "npm run build && node scripts/run-parser-fuzz-check.mjs",
-    "corpus:diff": "npm run build && node scripts/corpus-diff.mjs"
+    "corpus:diff": "npm run build && node scripts/corpus-diff.mjs",
+    "corpus:gate": "npm run build && node scripts/run-property-gate.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.5.0",

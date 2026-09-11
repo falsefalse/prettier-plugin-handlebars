@@ -1,12 +1,10 @@
 /* Property: the parser drops no source. Child lists tile their container's span, and every
- * expression part sits inside its call, in order.
- *
- * Tiling only means something over source the parser accepts, so the malformed corpus gets the
- * other half of the contract: it must be refused, and the refusal must say where. */
+ * expression part sits inside its call, in order. Tiling only means something over source the
+ * parser accepts, so the malformed corpus must be refused, with a location. */
 import { parse } from '../dist/parser.js';
 import { findExpressionViolations, findTilingViolations } from '../test/lib/ast-invariants.mts';
 import { TemplateSyntaxError } from '../dist/errors.js';
-import { fuzzCasesFromEnv, malformed } from './fuzz-cases.mjs';
+import { fuzzCasesFromEnv, malformed } from './lib/fuzz-cases.mjs';
 
 const { cases, seed } = fuzzCasesFromEnv();
 const failures = [];
