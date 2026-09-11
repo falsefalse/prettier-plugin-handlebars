@@ -10,6 +10,7 @@ import type {
   DecoratorStatement,
   MustacheStatement,
   PartialStatement,
+  TextNode,
   UnmatchedNode,
 } from '../types';
 
@@ -43,6 +44,15 @@ export function findPrettierIgnoreEnd(text: string, position: number): number | 
   }
 
   return null;
+}
+
+/** A run of source kept as text. `verbatim` means the printer reproduces it rather than reflowing. */
+export function textNode(text: string, start: number, end: number, rangeOffset: number, verbatim = false): TextNode {
+  const node: TextNode = verbatim
+    ? { type: 'TextNode', chars: text.slice(start, end), verbatim }
+    : { type: 'TextNode', chars: text.slice(start, end) };
+
+  return withRange(node, rangeOffset + start, rangeOffset + end);
 }
 
 export function createUnmatchedNode(text: string, start: number, end: number, rangeOffset: number): UnmatchedNode {

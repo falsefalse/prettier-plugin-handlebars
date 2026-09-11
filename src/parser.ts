@@ -45,6 +45,7 @@ import {
   createMustache,
   createStatement,
   createUnmatchedNode,
+  textNode,
   findPrettierIgnoreEnd,
   getPrettierIgnoreDirective,
 } from './parse/nodes';
@@ -107,15 +108,7 @@ function parseChildren(
 
     if (rawContent.length > 0) {
       nodes.push(
-        withRange(
-          {
-            type: 'TextNode',
-            chars: rawContent,
-            verbatim: true,
-          },
-          rangeOffset + pos,
-          rangeOffset + contentEnd,
-        ),
+        textNode(text, pos, contentEnd, rangeOffset, true),
       );
     }
 
@@ -264,11 +257,7 @@ function parseChildren(
          * printer's own final newline additive, and the file grows a line on every format. */
         const end = closeIdx >= 0 ? closeIdx + 1 : trimTrailingWhitespace(text, pos);
         nodes.push(
-          withRange(
-            { type: 'TextNode', chars: text.slice(pos, end), verbatim: true },
-            rangeOffset + pos,
-            rangeOffset + end,
-          ),
+          textNode(text, pos, end, rangeOffset, true),
         );
         pos = end;
         continue;
@@ -277,11 +266,7 @@ function parseChildren(
       if (!isTagStart(text, pos)) {
         const nextMarkup = findNextMarkup(text, pos + 1);
         nodes.push(
-          withRange(
-            { type: 'TextNode', chars: text.slice(pos, nextMarkup) },
-            rangeOffset + pos,
-            rangeOffset + nextMarkup,
-          ),
+          textNode(text, pos, nextMarkup, rangeOffset),
         );
         pos = nextMarkup;
         continue;
@@ -296,11 +281,7 @@ function parseChildren(
         const end = closeIdx + 3;
 
         nodes.push(
-          withRange(
-            { type: 'TextNode', chars: text.slice(pos, end), verbatim: true },
-            rangeOffset + pos,
-            rangeOffset + end,
-          ),
+          textNode(text, pos, end, rangeOffset, true),
         );
         pos = end;
         continue;
@@ -396,7 +377,7 @@ function parseChildren(
     const nextMarkup = findNextMarkup(text, pos);
     if (nextMarkup > pos) {
       nodes.push(
-        withRange({ type: 'TextNode', chars: text.slice(pos, nextMarkup) }, rangeOffset + pos, rangeOffset + nextMarkup),
+        textNode(text, pos, nextMarkup, rangeOffset),
       );
     }
     pos = nextMarkup;
@@ -833,7 +814,7 @@ function parseAttributeValueParts(
     const rawBlockEnd = consumeTerminatedRawBlock(value, pos, rangeOffset);
     if (rawBlockEnd !== null) {
       parts.push(
-        withRange({ type: 'TextNode', chars: value.slice(pos, rawBlockEnd) }, rangeOffset + pos, rangeOffset + rawBlockEnd),
+        textNode(value, pos, rawBlockEnd, rangeOffset),
       );
       pos = rawBlockEnd;
       continue;
@@ -859,11 +840,7 @@ function parseAttributeValueParts(
       /* A value is a string, so the recovery here keeps the source as text rather than as a
        * node - unlike attribute position, where an unreadable token stays a mustache. */
       parts.push(
-        withRange(
-          { type: 'TextNode', chars: value.slice(pos, token.end) },
-          rangeOffset + pos,
-          rangeOffset + token.end,
-        ),
+        textNode(value, pos, token.end, rangeOffset),
       );
       pos = token.end;
       continue;
@@ -874,7 +851,7 @@ function parseAttributeValueParts(
     const rawText = value.slice(pos, end);
 
     if (rawText.length > 0) {
-      parts.push(withRange({ type: 'TextNode', chars: rawText }, rangeOffset + pos, rangeOffset + end));
+      parts.push(textNode(value, pos, end, rangeOffset));
     }
 
     pos = end;
