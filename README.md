@@ -27,7 +27,7 @@ Two consequences worth stating plainly:
 ## Install
 
 ```bash
-npm install --save-dev prettier github:falsefalse/prettier-plugin-handlebars
+npm install --save-dev prettier @falsefalse/prettier-plugin-handlebars
 ```
 
 ```js
