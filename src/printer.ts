@@ -5,6 +5,7 @@ import { handlebarsDialect as templateDialect } from './dialects/handlebars/toke
 import type {
   AttributeValue,
   BlockStatement,
+  Call,
   CommentStatement,
   DecoratorStatement,
   ElementAttribute,
@@ -13,7 +14,6 @@ import type {
   MustacheStatement,
   Node,
   PartialStatement,
-  Program,
   TextNode,
   UnmatchedNode,
 } from './types';
@@ -23,27 +23,13 @@ const { dedent, fill, group, hardline, ifBreak, indent, join, line, literalline,
 /* A run of blank lines collapses to one: two hardlines, never more. */
 const MAX_CONSECUTIVE_NEWLINES = 2;
 
-/**
- * Phase 4 of REWRITE-PLAN.md. Handles programs, text, mustaches and comments; anything else
- * throws by design, so the corpus gate can report honest coverage while the printer grows.
- */
 /** Only prettier's core options reach the printer; this formatter is opinionated. */
 export type PrintOptions = Pick<ParserOptions<Node>, 'printWidth' | 'tabWidth' | 'useTabs' | 'singleQuote'>;
 
-export class UnsupportedNodeError extends Error {
-  constructor(readonly nodeType: string) {
-    super(`printer v2 does not handle ${nodeType} yet`);
-    this.name = 'UnsupportedNodeError';
-  }
-}
+/** The `~` of `{{~foo~}}`, which strips the whitespace next to the delimiter it sits on. */
+const trim = (marker: boolean | undefined): string => (marker ? '~' : '');
 
-function countNewlines(text: string): number {
-  let count = 0;
-  for (const char of text) {
-    if (char === '\n') count += 1;
-  }
-  return count;
-}
+const hardlines = (count: number): Doc[] => Array.from({ length: count }, () => hardline);
 
 /* Sibling whitespace is laid out as pieces so a hard break can end the run it sits in, rather
  * than forcing every other gap in the same program to break with it. */
@@ -57,11 +43,9 @@ const isGap = (piece: Piece): boolean => piece.kind !== 'doc';
  * lines. A run of plain spaces becomes a `line`, free to collapse or wrap by width.
  */
 function whitespacePiece(text: string): Piece {
-  const newlines = countNewlines(text);
+  const newlines = text.split('\n').length - 1;
   return newlines === 0 ? { kind: 'space' } : { kind: 'break', count: Math.min(newlines, MAX_CONSECUTIVE_NEWLINES) };
 }
-
-const trailingWhitespacePattern = /\s+$/u;
 
 /**
  * A text run decomposes into the same pieces as a sibling list: words, and the gaps between
@@ -85,7 +69,7 @@ function textPieces(node: TextNode): Piece[] {
  * program: left inside the raw it would be reprinted *and* re-added as a line ending, growing
  * the file by a newline on every pass. */
 function unmatchedPieces(node: UnmatchedNode): Piece[] {
-  const trailing = trailingWhitespacePattern.exec(node.raw)?.[0] ?? '';
+  const trailing = /\s+$/u.exec(node.raw)?.[0] ?? '';
   const body = trailing ? node.raw.slice(0, -trailing.length) : node.raw;
 
   return [
@@ -129,9 +113,7 @@ function assemble(pieces: Piece[]): Doc[] {
   for (const piece of pieces) {
     if (piece.kind === 'break') {
       flushRun();
-      for (let index = 0; index < piece.count; index += 1) {
-        docs.push(hardline);
-      }
+      docs.push(...hardlines(piece.count));
       continue;
     }
 
@@ -150,32 +132,27 @@ function assemble(pieces: Piece[]): Doc[] {
   return docs;
 }
 
+/** Gaps outside a content run have nothing to wrap, so they print as themselves. */
+function gapDocs(gaps: Piece[]): Doc[] {
+  return gaps.flatMap((gap) => (gap.kind === 'break' ? hardlines(gap.count) : gap.kind === 'space' ? [line] : []));
+}
+
+/** The half-open span of `pieces` with the whitespace at either end excluded. */
+function contentSpan(pieces: Piece[]): [number, number] {
+  let start = 0;
+  let end = pieces.length;
+
+  while (start < end && isGap(pieces[start])) start += 1;
+  while (end > start && isGap(pieces[end - 1])) end -= 1;
+
+  return [start, end];
+}
+
 function printExpression(expression: Expression, breakable: boolean): Doc {
-  if (expression.type !== 'SubExpression') {
-    return expression.source;
-  }
-
-  const parts = printCallParts(expression, breakable);
-  if (parts.length === 0) {
-    return ['(', printExpression(expression.path, breakable), ')'];
-  }
-
-  if (!breakable) {
-    return ['(', printExpression(expression.path, false), ' ', join(' ', parts), ')'];
-  }
-
-  /* One group, so a subexpression that does not fit breaks every one of its parts. */
-  return group(['(', indent([printExpression(expression.path, true), line, join(line, parts)]), softline, ')']);
+  return expression.type === 'SubExpression' ? printCall(expression, '(', ')', breakable) : expression.source;
 }
 
-interface CallLike {
-  path: Expression;
-  params: Expression[];
-  hash: Array<{ key: string; value: Expression }>;
-  blockParams?: string[];
-}
-
-function printCallParts(call: CallLike, breakable: boolean): Doc[] {
+function printCallParts(call: Call, breakable: boolean): Doc[] {
   const parts: Doc[] = call.params.map((param) => printExpression(param, breakable));
 
   for (const pair of call.hash) {
@@ -190,7 +167,7 @@ function printCallParts(call: CallLike, breakable: boolean): Doc[] {
 }
 
 /** Whitespace inside a mustache does not render, so it is the formatter's: all-or-nothing. */
-function printCall(call: CallLike, open: Doc, close: Doc, breakable = true): Doc {
+function printCall(call: Call, open: Doc, close: Doc, breakable = true): Doc {
   const parts = printCallParts(call, breakable);
   if (parts.length === 0) {
     return [open, printExpression(call.path, breakable), close];
@@ -200,21 +177,20 @@ function printCall(call: CallLike, open: Doc, close: Doc, breakable = true): Doc
     return [open, printExpression(call.path, false), ' ', join(' ', parts), close];
   }
 
+  /* One group, so a call that does not fit breaks every one of its parts. */
   return group([open, indent([printExpression(call.path, true), line, join(line, parts)]), softline, close]);
 }
 
-function printMustache(node: MustacheStatement, breakable = true): Doc {
-  const [openDelimiter, closeDelimiter] = node.triple ? ['{{{', '}}}'] : ['{{', '}}'];
+/* The three inline statements are one call in different delimiters: a mustache in `{{}}` (or
+ * `{{{}}}` when unescaped), a partial in `{{> }}`, a decorator in `{{*}}`. */
+function printStatement(node: MustacheStatement | PartialStatement | DecoratorStatement, prefix: string): Doc {
+  const triple = node.type === 'MustacheStatement' && node.triple;
 
-  return printCall(node, [openDelimiter, node.trimOpen ? '~' : ''], [node.trimClose ? '~' : '', closeDelimiter], breakable);
-}
-
-function printPartial(node: PartialStatement, breakable = true): Doc {
-  return printCall(node, ['{{', node.trimOpen ? '~' : '', '> '], [node.trimClose ? '~' : '', '}}'], breakable);
-}
-
-function printDecorator(node: DecoratorStatement, breakable = true): Doc {
-  return printCall(node, ['{{', node.trimOpen ? '~' : '', '*'], [node.trimClose ? '~' : '', '}}'], breakable);
+  return printCall(
+    node,
+    [triple ? '{{{' : '{{', trim(node.trimOpen), prefix],
+    [trim(node.trimClose), triple ? '}}}' : '}}'],
+  );
 }
 
 function printComment(node: CommentStatement): Doc {
@@ -241,18 +217,12 @@ function printComment(node: CommentStatement): Doc {
   return [open, lead, join(literalline, body.split('\n')), tail, close];
 }
 
-/* An attribute value is content: its text is reproduced exactly. Only the calls inside it may be
- * reflowed, since whitespace within a mustache never reaches the rendered value. */
-function printAttributeValue(value: AttributeValue, options: PrintOptions): Doc[] {
-  return value.parts.map((part) => (part.type === 'TextNode' ? part.chars : printAny(part, options)));
-}
-
-function chooseQuote(value: AttributeValue, preferSingle: boolean): '"' | "'" {
-  const text = value.parts.map((part) => (part.type === 'TextNode' ? part.chars : '')).join('');
+/** The quote that needs no escaping; `singleQuote` decides only when either would do. */
+function chooseQuote(parts: AttributeValue['parts'], preferSingle: boolean): '"' | "'" {
+  const text = parts.map((part) => (part.type === 'TextNode' ? part.chars : '')).join('');
   const preferred = preferSingle ? "'" : '"';
-  const fallback = preferSingle ? '"' : "'";
 
-  return text.includes(preferred) ? fallback : preferred;
+  return text.includes(preferred) ? (preferSingle ? '"' : "'") : preferred;
 }
 
 function printAttribute(attribute: ElementAttribute, options: PrintOptions): Doc {
@@ -268,8 +238,18 @@ function printAttribute(attribute: ElementAttribute, options: PrintOptions): Doc
     return attribute.name;
   }
 
-  const quote = chooseQuote(attribute.value, options.singleQuote === true);
-  return [attribute.name, '=', quote, ...printAttributeValue(attribute.value, options), quote];
+  /* An attribute value is content: its text is reproduced exactly. Only the calls inside it may
+   * be reflowed, since whitespace within a mustache never reaches the rendered value. */
+  const { parts } = attribute.value;
+  const quote = chooseQuote(parts, options.singleQuote === true);
+
+  return [
+    attribute.name,
+    '=',
+    quote,
+    ...parts.map((part) => (part.type === 'TextNode' ? part.chars : printAny(part, options))),
+    quote,
+  ];
 }
 
 /**
@@ -294,20 +274,6 @@ function printOpenTag(node: ElementNode, options: PrintOptions): Doc {
   ]);
 }
 
-function gapDocs(gaps: Piece[]): Doc[] {
-  const docs: Doc[] = [];
-
-  for (const gap of gaps) {
-    if (gap.kind === 'break') {
-      for (let index = 0; index < gap.count; index += 1) docs.push(hardline);
-    } else if (gap.kind === 'space') {
-      docs.push(line);
-    }
-  }
-
-  return docs;
-}
-
 /**
  * The content between two markers - a tag's brackets, or a block's open and close. The trailing
  * gap sits inside the indent and is dedented from there, which lands the following marker back
@@ -319,10 +285,7 @@ function printBody(pieces: Piece[]): Doc[] {
     return [];
   }
 
-  let start = 0;
-  let end = pieces.length;
-  while (start < end && isGap(pieces[start])) start += 1;
-  while (end > start && isGap(pieces[end - 1])) end -= 1;
+  const [start, end] = contentSpan(pieces);
 
   /* Nothing but whitespace inside: emit it once rather than as both edges. */
   if (start >= end) {
@@ -349,11 +312,10 @@ function printElement(node: ElementNode, options: PrintOptions): Doc {
 }
 
 function printBlock(node: BlockStatement, options: PrintOptions): Doc {
-  const sections = [
-    childPieces(node.program.body, options),
-    ...(node.inverseChain ?? []).map((branch) => childPieces(branch.program.body, options)),
-    childPieces(node.inverse.body, options),
-  ];
+  const branches = node.inverseChain ?? [];
+  const sections = [node.program, ...branches.map((branch) => branch.program), node.inverse].map((program) =>
+    childPieces(program.body, options),
+  );
 
   /* A block the author kept on one line is an atom: splitting `{{else if` from its condition to
    * save a few columns is never an improvement. Once the body breaks, the markers already sit on
@@ -361,36 +323,26 @@ function printBlock(node: BlockStatement, options: PrintOptions): Doc {
   const breakable = sections.some((pieces) => pieces.some((piece) => piece.kind === 'break'));
 
   const prefix = templateDialect.getPrintedBlockPrefix(node.blockPrefix ?? '#');
-  const openTag = printCall(node, ['{{', node.trimOpen ? '~' : '', prefix], [node.trimClose ? '~' : '', '}}'], breakable);
+  const parts: Doc[] = [
+    printCall(node, ['{{', trim(node.trimOpen), prefix], [trim(node.trimClose), '}}'], breakable),
+    ...printBody(sections[0]),
+  ];
 
-  const parts: Doc[] = [openTag, ...printBody(sections[0])];
-
-  (node.inverseChain ?? []).forEach((branch, index) => {
-    const branchOpen = printCall(
-      branch,
-      ['{{', branch.trimOpen ? '~' : '', `${templateDialect.getElseKeyword()} `],
-      [branch.trimClose ? '~' : '', '}}'],
-      breakable,
-    );
-    parts.push(branchOpen, ...printBody(sections[index + 1]));
+  branches.forEach((branch, index) => {
+    const open = ['{{', trim(branch.trimOpen), `${templateDialect.getElseKeyword()} `];
+    parts.push(printCall(branch, open, [trim(branch.trimClose), '}}'], breakable), ...printBody(sections[index + 1]));
   });
 
   if (node.inverse.body.length > 0) {
-    const inverseOpen = [
-      '{{',
-      node.inverseTrimOpen ? '~' : '',
-      templateDialect.getElseKeyword(),
-      node.inverseTrimClose ? '~' : '',
-      '}}',
-    ];
-    parts.push(inverseOpen, ...printBody(sections[sections.length - 1]));
+    const open = ['{{', trim(node.inverseTrimOpen), templateDialect.getElseKeyword(), trim(node.inverseTrimClose), '}}'];
+    parts.push(open, ...printBody(sections[sections.length - 1]));
   }
 
   parts.push([
     '{{',
-    node.closeTrimOpen ? '~' : '',
+    trim(node.closeTrimOpen),
     templateDialect.getBlockClosePrefix(node.path.source),
-    node.closeTrimClose ? '~' : '',
+    trim(node.closeTrimClose),
     '}}',
   ]);
 
@@ -417,21 +369,15 @@ function childPieces(nodes: Node[], options: PrintOptions): Piece[] {
   return pieces;
 }
 
-function printProgram(nodes: Node[], isRoot: boolean, options: PrintOptions): Doc {
+/**
+ * A template's own leading and trailing whitespace is not content: the file ends in exactly one
+ * newline whatever the author left behind.
+ */
+function printRoot(nodes: Node[], options: PrintOptions): Doc {
   const pieces = childPieces(nodes, options);
+  const [start, end] = contentSpan(pieces);
 
-  if (!isRoot) {
-    return assemble(pieces);
-  }
-
-  /* A template's own leading and trailing whitespace is not content; the file ends in exactly
-   * one newline whatever the author left behind. */
-  let first = 0;
-  let last = pieces.length;
-  while (first < last && isGap(pieces[first])) first += 1;
-  while (last > first && isGap(pieces[last - 1])) last -= 1;
-
-  return first >= last ? '' : [...assemble(pieces.slice(first, last)), hardline];
+  return start >= end ? '' : [...assemble(pieces.slice(start, end)), hardline];
 }
 
 /**
@@ -442,22 +388,22 @@ function printProgram(nodes: Node[], isRoot: boolean, options: PrintOptions): Do
 function printAny(node: Node, options: PrintOptions): Doc {
   switch (node.type) {
     case 'Program':
-      return printProgram(node.body, false, options);
+      return assemble(childPieces(node.body, options));
 
     case 'TextNode':
       return assemble(textPieces(node));
 
     case 'MustacheStatement':
-      return printMustache(node);
+      return printStatement(node, '');
+
+    case 'PartialStatement':
+      return printStatement(node, '> ');
+
+    case 'DecoratorStatement':
+      return printStatement(node, '*');
 
     case 'CommentStatement':
       return printComment(node);
-
-    case 'PartialStatement':
-      return printPartial(node);
-
-    case 'DecoratorStatement':
-      return printDecorator(node);
 
     case 'UnmatchedNode':
       return join(literalline, node.raw.split('\n'));
@@ -470,37 +416,26 @@ function printAny(node: Node, options: PrintOptions): Doc {
   }
 }
 
-function visitorKeysFor(type: string | undefined): string[] {
-  switch (type) {
-    case 'Program':
-      return ['body'];
-    case 'ElementNode':
-      return ['attributes', 'children'];
-    case 'Attribute':
-      return ['value'];
-    case 'AttributeValue':
-      return ['parts'];
-    case 'AttributeBlock':
-      return ['block'];
-    case 'BlockStatement':
-      return ['program', 'inverseChain', 'inverse'];
-    case 'ElseBranch':
-      return ['program'];
-    default:
-      return [];
-  }
-}
+/* Prettier walks the tree itself to track a cursor offset; the printer's own recursion does not
+ * use these. */
+const visitorKeys: Record<string, string[]> = {
+  Program: ['body'],
+  ElementNode: ['attributes', 'children'],
+  Attribute: ['value'],
+  AttributeValue: ['parts'],
+  AttributeBlock: ['block'],
+  BlockStatement: ['program', 'inverseChain', 'inverse'],
+  ElseBranch: ['program'],
+};
 
 export const printer: Printer<Node> = {
   /* Only the root reaches this: everything below recurses through printAny. */
   print(path: AstPath<Node>, options: ParserOptions<Node>): Doc {
     const node = path.node;
-    return node.type === 'Program' && path.parent === null
-      ? printProgram(node.body, true, options)
-      : printAny(node, options);
+    return node.type === 'Program' && path.parent === null ? printRoot(node.body, options) : printAny(node, options);
   },
   getVisitorKeys(node, nonTraversableKeys) {
-    const type = typeof node === 'object' && node !== null && 'type' in node ? String(node.type) : undefined;
-    return visitorKeysFor(type).filter((key) => !nonTraversableKeys.has(key));
+    const type = typeof node === 'object' && node !== null && 'type' in node ? String(node.type) : '';
+    return (visitorKeys[type] ?? []).filter((key) => !nonTraversableKeys.has(key));
   },
 };

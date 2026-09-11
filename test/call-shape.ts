@@ -2,45 +2,38 @@
  * every call node back to plain strings so those assertions stay readable; the structured shape
  * has its own suite in expression.test.ts. */
 
-type Unknown = Record<string, unknown>;
-
-const isObject = (value: unknown): value is Unknown => typeof value === 'object' && value !== null;
-
-function hasSource(value: unknown): value is { source: string } {
-  return isObject(value) && typeof value.source === 'string';
-}
-
-function isCall(value: Unknown): boolean {
-  return hasSource(value.path) && Array.isArray(value.params) && Array.isArray(value.hash);
-}
-
-export function flattenCalls<T>(node: T): T {
+/* The walk is over shapeless AST data, so it is typed as such: hand-rolled guards here would
+ * only assert what the parser's own types already say. */
+function flatten(node: any): any {
   if (Array.isArray(node)) {
-    return node.map(flattenCalls) as unknown as T;
+    return node.map(flatten);
   }
 
-  if (!isObject(node)) {
+  if (typeof node !== 'object' || node === null) {
     return node;
   }
 
-  /* `range` is defined non-enumerable so it stays out of snapshots; copy descriptors rather
-   * than entries so the copy keeps that property too. */
-  const flattened: Unknown = {};
-  for (const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(node))) {
-    Object.defineProperty(flattened, key, {
-      ...descriptor,
-      ...('value' in descriptor ? { value: flattenCalls(descriptor.value) } : {}),
-    });
+  const flattened = Object.fromEntries(Object.entries(node).map(([key, value]) => [key, flatten(value)]));
+
+  /* `range` is the one non-enumerable property, kept that way so it stays out of assertions
+   * while the location hooks can still read it. Carry the descriptor, not the value. */
+  const range = Object.getOwnPropertyDescriptor(node, 'range');
+  if (range) {
+    Object.defineProperty(flattened, 'range', range);
   }
 
-  if (isCall(node) && hasSource(node.path)) {
+  /* Structural, not by node type: mustaches, blocks, partials, decorators and subexpressions
+   * all carry the same three properties. */
+  if (Array.isArray(node.params) && Array.isArray(node.hash)) {
     flattened.path = node.path.source;
-    flattened.params = (node.params as Array<{ source: string }>).map((param) => param.source);
-    flattened.hash = (node.hash as Array<{ key: string; value: { source: string } }>).map((pair) => ({
-      key: pair.key,
-      value: pair.value.source,
-    }));
+    flattened.params = node.params.map((param: any) => param.source);
+    flattened.hash = node.hash.map((pair: any) => ({ key: pair.key, value: pair.value.source }));
   }
 
-  return flattened as T;
+  return flattened;
+}
+
+/** The AST comes back the shape it went in; only calls change. */
+export function flattenCalls<T>(node: T): T {
+  return flatten(node);
 }

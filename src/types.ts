@@ -115,6 +115,9 @@ export interface MustacheBase {
   trimClose?: boolean;
 }
 
+/** The parts every call shares: a mustache, a block marker, a partial, a subexpression. */
+export type Call = Pick<MustacheBase, 'path' | 'params' | 'hash' | 'blockParams'>;
+
 export interface MustacheStatement extends MustacheBase, SourceRange {
   type: 'MustacheStatement';
   triple: boolean;

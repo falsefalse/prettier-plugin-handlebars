@@ -1,6 +1,6 @@
 # Printer rewrite plan
 
-Status: in progress (phases 0-6 done). Branch: `feat/printer-v2`, cut from the tip of `master`.
+Status: in progress (phases 0-6.1 done). Branch: `feat/printer-v2`, cut from the tip of `master`.
 `feat/style-options` stays as the record of what not to do.
 
 ## 1. What went wrong, precisely

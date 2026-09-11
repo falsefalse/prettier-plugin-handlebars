@@ -1,15 +1,10 @@
-/* Property: formatting is idempotent and never crashes, over the shared fuzz corpus.
- *
- * While the v2 printer is still growing it throws UnsupportedNodeError on node types it does not
- * handle. Those cases are counted as not-yet-covered rather than failures, so the number means
- * something at every phase. */
+/* Property: formatting is idempotent and never crashes, over the shared fuzz corpus. */
 import prettier from 'prettier';
 import * as plugin from '../dist/plugin.js';
 import { fuzzCasesFromEnv } from './fuzz-cases.mjs';
 
 const { cases, seed } = fuzzCasesFromEnv();
 const failures = [];
-let unsupported = 0;
 
 for (const testCase of cases) {
   try {
@@ -34,11 +29,6 @@ for (const testCase of cases) {
       });
     }
   } catch (error) {
-    if (error?.cause?.name === 'UnsupportedNodeError' || error?.name === 'UnsupportedNodeError') {
-      unsupported += 1;
-      continue;
-    }
-
     failures.push({
       id: testCase.id,
       type: 'crash',
@@ -69,5 +59,4 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-const covered = cases.length - unsupported;
-console.log(`Format fuzz check passed: ${covered}/${cases.length} cases covered, seed=${seed}.`);
+console.log(`Format fuzz check passed: ${cases.length}/${cases.length} cases covered, seed=${seed}.`);

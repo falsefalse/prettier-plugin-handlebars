@@ -1,6 +1,4 @@
-import type { Expression, HashPair, LiteralType, MustacheBase, PathExpression, SubExpression } from './types';
-
-export type ParsedCall = Pick<MustacheBase, 'path' | 'params' | 'hash' | 'blockParams'>;
+import type { Call, Expression, HashPair, Literal, LiteralType, PathExpression, SubExpression } from './types';
 
 const quoteCharacters = new Set(['"', "'", '`']);
 const numberPattern = /^-?(?:\d+\.?\d*|\.\d+)$/u;
@@ -65,8 +63,7 @@ class CallReader {
     return match[1].trim().split(/\s+/u).filter(Boolean);
   }
 
-  private readQuoted(): [number, number] {
-    const start = this.index;
+  private skipQuoted(): void {
     const quote = this.peek();
     this.index += 1;
 
@@ -82,13 +79,10 @@ class CallReader {
         break;
       }
     }
-
-    return [start, this.index];
   }
 
   /** A bare run stops at whitespace, a closing paren, or the `=` of a hash pair. */
-  private readBare(): [number, number] {
-    const start = this.index;
+  private skipBare(): void {
     let brackets = 0;
 
     while (!this.done) {
@@ -100,8 +94,11 @@ class CallReader {
 
       this.index += 1;
     }
+  }
 
-    return [start, this.index];
+  /** A leaf is its own source text and the span it came from; only the label differs. */
+  private leaf(type: LiteralType | 'PathExpression', start: number): Literal | PathExpression {
+    return { type, source: this.source.slice(start, this.index), range: this.span(start, this.index) };
   }
 
   private readSubExpression(): SubExpression {
@@ -128,38 +125,33 @@ class CallReader {
       return this.readSubExpression();
     }
 
+    const start = this.index;
+
     if (quoteCharacters.has(this.peek())) {
-      const [start, end] = this.readQuoted();
-      return { type: 'StringLiteral', source: this.source.slice(start, end), range: this.span(start, end) };
+      this.skipQuoted();
+      return this.leaf('StringLiteral', start);
     }
 
-    const [start, end] = this.readBare();
-    const source = this.source.slice(start, end);
+    this.skipBare();
 
     /* An empty read would spin forever; consume the character as a path instead. */
-    if (start === end) {
+    if (this.index === start) {
       this.index += 1;
-      return { type: 'PathExpression', source: this.source.slice(start, this.index), range: this.span(start, this.index) };
     }
 
-    const literalType = literalTypeOf(source);
-    return literalType
-      ? { type: literalType, source, range: this.span(start, end) }
-      : { type: 'PathExpression', source, range: this.span(start, end) };
+    return this.leaf(literalTypeOf(this.source.slice(start, this.index)) ?? 'PathExpression', start);
   }
 
   /** A head must be callable, so a stray literal is reread as a path rather than rejected. */
   private readHead(): PathExpression | SubExpression {
     const value = this.readValue();
 
-    if (value.type === 'SubExpression' || value.type === 'PathExpression') {
-      return value;
-    }
-
-    return { type: 'PathExpression', source: value.source, range: value.range };
+    return value.type === 'SubExpression' || value.type === 'PathExpression'
+      ? value
+      : { type: 'PathExpression', source: value.source, range: value.range };
   }
 
-  readCall(nested = false): ParsedCall {
+  readCall(nested = false): Call {
     this.skipWhitespace();
 
     const path = this.done || this.peek() === ')' ? this.emptyPath() : this.readHead();
@@ -213,6 +205,6 @@ class CallReader {
  * `offset` is where `source` begins in the template, so a subexpression buried in a hash value
  * can still be located exactly.
  */
-export function parseCall(source: string, offset = 0): ParsedCall {
+export function parseCall(source: string, offset = 0): Call {
   return new CallReader(source, offset).readCall();
 }
