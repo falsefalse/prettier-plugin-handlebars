@@ -1,6 +1,6 @@
 {
   "name": "@falsefalse/prettier-plugin-handlebars",
-  "version": "0.0.2",
+  "version": "0.0.5",
   "description": "Whitespace-aware Handlebars formatter for Prettier",
   "contributors": [
     "Claude <noreply@anthropic.com>"
