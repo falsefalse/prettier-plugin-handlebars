@@ -2,7 +2,15 @@
  * the tree builder can decide whether to refuse before it has committed to a node. */
 import { isRawTextElement } from '../core/html';
 import { fail } from '../core/errors';
-import { handlebarsDialect, handlebarsRawBlockCloser, handlebarsRawBlockName } from '../dialects/handlebars/tokens';
+import {
+  consumeRawBlock,
+  findNextHandlebarsOpen,
+  handlebarsRawBlockCloser,
+  handlebarsRawBlockName,
+  isDynamicTagStart,
+  openDelimiter,
+  parseMustacheToken,
+} from '../dialects/handlebars/tokens';
 import type { HandlebarsToken as MustacheToken } from '../dialects/handlebars/tokens';
 import {
   consumeTagLikeChunk,
@@ -13,14 +21,6 @@ import {
   startsTemplateTag,
   tagNameTerminator,
 } from './lex';
-
-export const {
-  openDelimiter,
-  parseToken: parseMustacheToken,
-  findNextOpen: findNextHandlebarsOpen,
-  isDynamicElementStart: isDynamicTagStart,
-  consumeRawBlock,
-} = handlebarsDialect;
 
 /* Where a raw block at `position` ends, or null if there is not one there. A body Handlebars
  * emits literally is copied through wherever it appears; one that never closes is rejected

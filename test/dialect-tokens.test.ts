@@ -1,48 +1,57 @@
 import { describe, expect, it } from 'vitest';
-import { handlebarsDialect } from '../src/dialects/handlebars/tokens';
+import {
+  consumeRawBlock,
+  ELSE_KEYWORD,
+  findNextHandlebarsOpen,
+  getBlockClosePrefix,
+  getBlockExpression,
+  getBlockPrefix,
+  getPrintedBlockPrefix,
+  parseMustacheToken,
+} from '../src/dialects/handlebars/tokens';
 
 describe('handlebars dialect tokens', () => {
   it('classifies Handlebars token forms', () => {
-    expect(handlebarsDialect.parseToken('{{#if ok}}', 0)).toMatchObject({
+    expect(parseMustacheToken('{{#if ok}}', 0)).toMatchObject({
       kind: 'blockStart',
       name: 'if',
     });
-    expect(handlebarsDialect.parseToken('{{/if}}', 0)).toMatchObject({
+    expect(parseMustacheToken('{{/if}}', 0)).toMatchObject({
       kind: 'blockEnd',
       name: 'if',
     });
-    expect(handlebarsDialect.parseToken('{{> user-card}}', 0)).toMatchObject({
+    expect(parseMustacheToken('{{> user-card}}', 0)).toMatchObject({
       kind: 'partial',
       content: 'user-card',
     });
-    expect(handlebarsDialect.parseToken('{{!-- comment --}}', 0)).toMatchObject({
+    expect(parseMustacheToken('{{!-- comment --}}', 0)).toMatchObject({
       kind: 'comment',
       content: '!-- comment',
     });
   });
 
   it('classifies Handlebars dialect-only special forms', () => {
-    expect(handlebarsDialect.parseToken('{{else if ready}}', 0)).toMatchObject({
+    expect(parseMustacheToken('{{else if ready}}', 0)).toMatchObject({
       kind: 'else',
       specialForm: 'elseIf',
     });
-    expect(handlebarsDialect.parseToken('{{#> card}}', 0)).toMatchObject({
+    expect(parseMustacheToken('{{#> card}}', 0)).toMatchObject({
       kind: 'blockStart',
       specialForm: 'blockPartial',
     });
-    expect(handlebarsDialect.parseToken('{{#*inline "row"}}', 0)).toMatchObject({
+    expect(parseMustacheToken('{{#*inline "row"}}', 0)).toMatchObject({
       kind: 'blockStart',
       specialForm: 'decoratorBlock',
     });
-    expect(handlebarsDialect.parseToken('{{*log}}', 0)).toMatchObject({
+    expect(parseMustacheToken('{{*log}}', 0)).toMatchObject({
       kind: 'mustache',
       specialForm: 'decorator',
     });
-    expect(handlebarsDialect.parseToken('{{< layout}}', 0)).toMatchObject({
+    expect(parseMustacheToken('{{< layout}}', 0)).toMatchObject({
       kind: 'blockStart',
       specialForm: 'parent',
     });
-    expect(handlebarsDialect.parseToken('{{$title}}', 0)).toMatchObject({
+    expect(parseMustacheToken('{{$title}}', 0)).toMatchObject({
       kind: 'blockStart',
       specialForm: 'mustacheBlock',
     });
@@ -50,19 +59,19 @@ describe('handlebars dialect tokens', () => {
 
   it('keeps scanning and recovery rules in the dialect', () => {
     const escaped = '\\{{ignored}} {{name}}';
-    expect(handlebarsDialect.findNextOpen(escaped, 0)).toBe(13);
+    expect(findNextHandlebarsOpen(escaped, 0)).toBe(13);
 
     const rawBlock = '{{{{raw}}}} {{value}} {{{{/raw}}}}';
-    expect(handlebarsDialect.consumeRawBlock(rawBlock, 0)).toBe(rawBlock.length);
+    expect(consumeRawBlock(rawBlock, 0)).toBe(rawBlock.length);
 
-    const parent = handlebarsDialect.parseToken('{{< layout}}', 0);
-    expect(handlebarsDialect.getBlockExpression(parent)).toBe('layout');
-    expect(handlebarsDialect.getBlockPrefix(parent)).toBe('<');
-    expect(handlebarsDialect.getPrintedBlockPrefix('<')).toBe('< ');
+    const parent = parseMustacheToken('{{< layout}}', 0);
+    expect(getBlockExpression(parent)).toBe('layout');
+    expect(getBlockPrefix(parent)).toBe('<');
+    expect(getPrintedBlockPrefix('<')).toBe('< ');
   });
 
   it('keeps Handlebars print syntax in the dialect', () => {
-    expect(handlebarsDialect.getElseKeyword()).toBe('else');
-    expect(handlebarsDialect.getBlockClosePrefix('if')).toBe('/if');
+    expect(ELSE_KEYWORD).toBe('else');
+    expect(getBlockClosePrefix('if')).toBe('/if');
   });
 });

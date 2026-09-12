@@ -52,8 +52,12 @@ import {
 import { parseCall } from './expression';
 import type { HandlebarsToken as MustacheToken } from './dialects/handlebars/tokens';
 import {
-  handlebarsDialect,
+  findNextHandlebarsOpen,
+  getBlockExpression,
+  getBlockPrefix,
   isHandlebarsBlockComment,
+  parseMustacheToken,
+  shouldPreserveMustacheVerbatim,
 } from './dialects/handlebars/tokens';
 
 interface ParseResult {
@@ -66,16 +70,6 @@ interface ParseResult {
   /** How the author spelled the closing tag, which need not match the opening one's case. */
   closeTag?: string;
 }
-
-/* Destructured rather than wrapped: seven of these had a one-line function around them whose
- * only job was to give the dialect member a local name. */
-const {
-  parseToken: parseMustacheToken,
-  findNextOpen: findNextHandlebarsOpen,
-  getBlockExpression,
-  getBlockPrefix,
-  shouldPreserveTokenVerbatim: shouldPreserveMustacheVerbatim,
-} = handlebarsDialect;
 
 export function parse(text: string): Program {
   const normalizedText = normalizeInput(text);

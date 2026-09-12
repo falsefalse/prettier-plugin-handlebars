@@ -43,7 +43,8 @@ export type ElementAttribute = SourceRange & { glued?: boolean } & (
   | {
       type: 'Attribute';
       name: string;
-      value?: AttributeValue | null;
+      /** Always present, `null` for a bare attribute: one spelling for absent, not two. */
+      value: AttributeValue | null;
     }
   | {
       type: 'RawAttribute';

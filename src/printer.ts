@@ -1,7 +1,7 @@
 import type { AstPath, Doc, Printer } from 'prettier';
 import { builders, utils } from 'prettier/doc';
 import { isVoidElement } from './core/html';
-import { handlebarsDialect as templateDialect } from './dialects/handlebars/tokens';
+import { ELSE_KEYWORD, getBlockClosePrefix, getPrintedBlockPrefix } from './dialects/handlebars/tokens';
 import * as whitespace from './core/whitespace';
 import type {
   BlockStatement,
@@ -510,8 +510,7 @@ interface BlockSection {
 }
 
 function printBlock(node: BlockStatement, options: PrintOptions, tail: Doc = []): Doc {
-  const prefix = templateDialect.getPrintedBlockPrefix(node.blockPrefix ?? '#');
-  const elseKeyword = templateDialect.getElseKeyword();
+  const prefix = getPrintedBlockPrefix(node.blockPrefix ?? '#');
 
   const sections: BlockSection[] = [
     {
@@ -524,7 +523,7 @@ function printBlock(node: BlockStatement, options: PrintOptions, tail: Doc = [])
       open: (breakable: boolean) =>
         printCall(
           branch,
-          ['{{', trim(branch.trimOpen), `${elseKeyword} `],
+          ['{{', trim(branch.trimOpen), `${ELSE_KEYWORD} `],
           [trim(branch.trimClose), '}}'],
           options,
           breakable,
@@ -537,14 +536,14 @@ function printBlock(node: BlockStatement, options: PrintOptions, tail: Doc = [])
   if (node.inverse.body.length > 0 || node.inverseTrimOpen || node.inverseTrimClose) {
     sections.push({
       program: node.inverse,
-      open: () => ['{{', trim(node.inverseTrimOpen), elseKeyword, trim(node.inverseTrimClose), '}}'],
+      open: () => ['{{', trim(node.inverseTrimOpen), ELSE_KEYWORD, trim(node.inverseTrimClose), '}}'],
     });
   }
 
   const close: Doc = [
     '{{',
     trim(node.closeTrimOpen),
-    templateDialect.getBlockClosePrefix(printSource(node.path.source, options)),
+    getBlockClosePrefix(printSource(node.path.source, options)),
     trim(node.closeTrimClose),
     '}}',
     tail,

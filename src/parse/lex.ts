@@ -3,10 +3,8 @@
 import { isVoidElement } from '../core/html';
 import { scanPastQuotes } from '../core/scan';
 import * as whitespace from '../core/whitespace';
-import { handlebarsDialect } from '../dialects/handlebars/tokens';
+import { isEscapedOpen, openDelimiter, parseMustacheToken } from '../dialects/handlebars/tokens';
 import type { ElementAttribute } from '../types';
-
-export const { openDelimiter, isEscapedOpen, parseToken: parseMustacheToken } = handlebarsDialect;
 
 /* Built from the shared class so the character list stays written in one place. */
 export const leadingWhitespace = new RegExp(`^${whitespace.htmlRun.source}`, 'u');

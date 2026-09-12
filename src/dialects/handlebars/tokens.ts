@@ -39,23 +39,10 @@ export interface HandlebarsToken {
   terminated: boolean;
 }
 
-/* Deliberately untyped. An interface here would fix a member for every piece of Handlebars
- * syntax, each a second copy to keep in step with the printer by hand; the inferred shape is
- * exactly what the parser and printer ask for. */
-export const handlebarsDialect = {
-  openDelimiter: '{{',
-  parseToken: parseHandlebarsToken,
-  findNextOpen: findNextHandlebarsOpen,
-  isEscapedOpen: isEscapedHandlebarsOpen,
-  isDynamicElementStart: isDynamicHandlebarsElementStart,
-  consumeRawBlock: consumeHandlebarsRawBlock,
-  getBlockExpression: getHandlebarsBlockExpression,
-  getBlockPrefix: getHandlebarsBlockPrefix,
-  getPrintedBlockPrefix: getPrintedHandlebarsBlockPrefix,
-  getElseKeyword: getHandlebarsElseKeyword,
-  getBlockClosePrefix: getHandlebarsBlockClosePrefix,
-  shouldPreserveTokenVerbatim: shouldPreserveHandlebarsTokenVerbatim,
-};
+export const openDelimiter = '{{';
+
+/** What an `{{else}}` is spelled, and what a block's closer opens with. */
+export const ELSE_KEYWORD = 'else';
 
 /**
  * The path a block opens on, which is where its name ends. A plain whitespace split cut
@@ -81,7 +68,7 @@ function readPathName(inner: string): string {
   return text;
 }
 
-function parseHandlebarsToken(text: string, position: number): HandlebarsToken {
+export function parseMustacheToken(text: string, position: number): HandlebarsToken {
   const triple = text.startsWith('{{{', position);
   const openLength = triple ? 3 : 2;
   const close = triple ? '}}}' : '}}';
@@ -234,7 +221,7 @@ function findHandlebarsClose(text: string, position: number, closeDelimiter: str
   });
 }
 
-function isEscapedHandlebarsOpen(text: string, position: number): boolean {
+export function isEscapedOpen(text: string, position: number): boolean {
   if (!text.startsWith('{{', position)) {
     return false;
   }
@@ -247,7 +234,7 @@ function isEscapedHandlebarsOpen(text: string, position: number): boolean {
   return slashCount % 2 === 1;
 }
 
-function findNextHandlebarsOpen(text: string, position: number): number {
+export function findNextHandlebarsOpen(text: string, position: number): number {
   let searchPos = position;
 
   while (searchPos < text.length) {
@@ -256,7 +243,7 @@ function findNextHandlebarsOpen(text: string, position: number): number {
       return -1;
     }
 
-    if (!isEscapedHandlebarsOpen(text, candidate)) {
+    if (!isEscapedOpen(text, candidate)) {
       return candidate;
     }
 
@@ -266,7 +253,7 @@ function findNextHandlebarsOpen(text: string, position: number): number {
   return -1;
 }
 
-function isDynamicHandlebarsElementStart(text: string, position: number): boolean {
+export function isDynamicTagStart(text: string, position: number): boolean {
   return text.startsWith('<{{', position) || text.startsWith('</{{', position);
 }
 
@@ -290,7 +277,7 @@ export function handlebarsRawBlockCloser(name: string): string {
   return `{{{{/${name}}}}}`;
 }
 
-function consumeHandlebarsRawBlock(text: string, position: number): number | null {
+export function consumeRawBlock(text: string, position: number): number | null {
   if (!text.startsWith('{{{{', position)) {
     return null;
   }
@@ -315,55 +302,35 @@ function consumeHandlebarsRawBlock(text: string, position: number): number | nul
   return closeIdx + closer.length;
 }
 
-function getHandlebarsBlockExpression(token: HandlebarsToken): string {
-  if (token.specialForm === 'blockPartial' || token.specialForm === 'decoratorBlock') {
-    return token.content.slice(2).trim();
-  }
+/* A table, not a chain: every form whose marker is not a plain `#`. The default is what a block
+ * with no special form opens with, so it is the one case left out. */
+const BLOCK_PREFIXES: Partial<Record<SpecialForm, BlockPrefix>> = {
+  blockPartial: '#>',
+  decoratorBlock: '#*',
+  inverseBlock: '^',
+  parent: '<',
+  mustacheBlock: '$',
+};
 
-  return token.content.slice(1).trim();
+export function getBlockPrefix(token: HandlebarsToken): BlockPrefix {
+  return (token.specialForm && BLOCK_PREFIXES[token.specialForm]) || '#';
 }
 
-function getHandlebarsBlockPrefix(token: HandlebarsToken): BlockPrefix {
-  if (token.specialForm === 'blockPartial') {
-    return '#>';
-  }
-
-  if (token.specialForm === 'decoratorBlock') {
-    return '#*';
-  }
-
-  if (token.specialForm === 'inverseBlock') {
-    return '^';
-  }
-
-  if (token.specialForm === 'parent') {
-    return '<';
-  }
-
-  if (token.specialForm === 'mustacheBlock') {
-    return '$';
-  }
-
-  return '#';
+/* The marker is what the expression starts after, so its length is the only thing that decides
+ * where to cut - stating the two-character forms a second time is how the two drift apart. */
+export function getBlockExpression(token: HandlebarsToken): string {
+  return token.content.slice(getBlockPrefix(token).length).trim();
 }
 
-function getPrintedHandlebarsBlockPrefix(prefix: BlockPrefix): string {
-  if (prefix === '#>' || prefix === '<') {
-    return `${prefix} `;
-  }
-
-  return prefix;
+export function getPrintedBlockPrefix(prefix: BlockPrefix): string {
+  return prefix === '#>' || prefix === '<' ? `${prefix} ` : prefix;
 }
 
-function getHandlebarsElseKeyword(): string {
-  return 'else';
-}
-
-function getHandlebarsBlockClosePrefix(path: string): string {
+export function getBlockClosePrefix(path: string): string {
   return `/${path}`;
 }
 
-function shouldPreserveHandlebarsTokenVerbatim(token: HandlebarsToken): boolean {
+export function shouldPreserveMustacheVerbatim(token: HandlebarsToken): boolean {
   return token.specialForm === 'elseIf';
 }
 
