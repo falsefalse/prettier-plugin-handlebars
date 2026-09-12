@@ -4,6 +4,8 @@
     "module": "CommonJS",
     "declaration": true,
     "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noImplicitOverride": true,
     "esModuleInterop": true,
     "types": ["node"],

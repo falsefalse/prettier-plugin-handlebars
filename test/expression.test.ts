@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { parseCall } from '../src/expression';
 import { parse } from '../src/parser';
-// @ts-expect-error
-import { findExpressionViolations, findTilingViolations } from './lib/ast-invariants.mts';
-import type { Expression, Program, SubExpression } from '../src/types';
+import { findExpressionViolations, findTilingViolations, walk } from './lib/ast-invariants.mts';
+import { ofType } from './lib/narrow';
+import type { Expression } from '../src/types';
 
 const kindsOf = (expressions: Expression[]) => expressions.map((expression) => expression.type);
 const sourcesOf = (expressions: Expression[]) => expressions.map((expression) => expression.source);
@@ -70,7 +70,7 @@ describe('subexpressions', () => {
     expect(kindsOf(outer.params)).toEqual(['StringLiteral', 'SubExpression']);
     expect(sourcesOf(outer.hash.map((pair) => pair.value))).toEqual(["'-'"]);
 
-    const inner = outer.params[1] as SubExpression;
+    const inner = ofType(outer.params[1], 'SubExpression');
     expect(inner.path.source).toBe('upper');
     expect(sourcesOf(inner.params)).toEqual(['c']);
   });
@@ -198,21 +198,13 @@ describe('ranges are absolute and contained', () => {
     const ranges: Array<string | undefined> = [];
 
 
-    // literally anything from Program down to strings and numbers, we recurse TODO: narrow it down
-    const collect = (record: any): void => {
-      if (record.type === 'ElementNode' && Array.isArray(record.attributes)) {
-        for (const attribute of record.attributes) {
-          ranges.push(attribute.range && source.slice(attribute.range[0], attribute.range[1]));
-          collect(attribute.block ?? attribute.value);
-        }
-      }
-      for (const value of Object.values(record)) {
-        if (Array.isArray(value)) value.forEach(collect);
-        else if (value && typeof value === 'object') collect(value);
-      }
-    };
+    walk(parse(source), (node) => {
+      if (node.type !== 'ElementNode') return;
 
-    collect(parse(source));
+      for (const attribute of node.attributes) {
+        ranges.push(attribute.range && source.slice(attribute.range[0], attribute.range[1]));
+      }
+    });
 
     expect(ranges).toContain('class="{{#if a}}<span title=\'{{x}}\'>y</span>{{/if}}"');
     expect(ranges).toContain("title='{{x}}'");

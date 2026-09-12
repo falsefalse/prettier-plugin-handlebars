@@ -1,7 +1,10 @@
 {
   "extends": "./ts.base.json",
   "compilerOptions": {
-    "noEmit": true
+    "noEmit": true,
+    /* The test suites and the gate scripts share `test/lib/*.mts`, so the suites import it by
+     * the name the scripts use. Only this project allows that; nothing emitted does. */
+    "allowImportingTsExtensions": true
   },
   "include": ["src", "test"]
 }

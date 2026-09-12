@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import prettier from 'prettier';
 import * as plugin from '../src/plugin';
-// @ts-expect-error
 import { renderDifference } from './lib/render.mts';
 
 async function format(source: string, printWidth = 80): Promise<string> {
-  return prettier.format(source, { parser: 'handlebars', plugins: [plugin as never], printWidth });
+  return prettier.format(source, { parser: 'handlebars', plugins: [plugin], printWidth });
 }
 
 async function expectStable(source: string, expected: string, printWidth = 80): Promise<void> {
@@ -336,7 +335,7 @@ describe('string literals inside mustaches', () => {
     for (const singleQuote of [true, false]) {
       const output = await prettier.format('{{t "k"}}', {
         parser: 'handlebars',
-        plugins: [plugin as never],
+        plugins: [plugin],
         singleQuote,
       });
 

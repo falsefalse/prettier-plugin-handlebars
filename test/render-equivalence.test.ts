@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import prettier from 'prettier';
 import * as plugin from '../src/plugin';
-// @ts-expect-error
 import { renderDifference, renders } from './lib/render.mts';
 
 async function format(source: string, printWidth = 80): Promise<string> {
-  return prettier.format(source, { parser: 'handlebars', plugins: [plugin as never], printWidth });
+  return prettier.format(source, { parser: 'handlebars', plugins: [plugin], printWidth });
 }
 
 /* These templates avoid HTML, so the only liberty `renders` still grants is a browser's
@@ -87,7 +86,7 @@ describe('formatting does not change what a template renders', () => {
   it('does the same under singleQuote', async () => {
     const output = await prettier.format('<div class="{{t \'x\'}}">a</div>', {
       parser: 'handlebars',
-      plugins: [plugin as never],
+      plugins: [plugin],
       singleQuote: true,
     });
 

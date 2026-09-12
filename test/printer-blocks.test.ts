@@ -3,7 +3,7 @@ import prettier from 'prettier';
 import * as plugin from '../src/plugin';
 
 async function format(source: string, printWidth = 80): Promise<string> {
-  return prettier.format(source, { parser: 'handlebars', plugins: [plugin as never], printWidth });
+  return prettier.format(source, { parser: 'handlebars', plugins: [plugin], printWidth });
 }
 
 async function expectStable(source: string, expected: string, printWidth = 80): Promise<void> {

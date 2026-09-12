@@ -80,7 +80,7 @@ describe('malformed templates are rejected', () => {
     '<div :bound="b" #ref v-bind:z="z">x</div>',
     '<div class="a" %weird>x</div>',
   ])('keeps every character of an unusual attribute name: %j', async (source) => {
-    expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] })).toBe(`${source}\n`);
+    expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin] })).toBe(`${source}\n`);
   });
 
   it.each([
@@ -100,7 +100,7 @@ describe('malformed templates are rejected', () => {
     ["<div title=a'b>x</div>", '<div title="a\'b">x</div>\n'],
     ["<img accept={{mimefor 'x'}}>", '<img accept="{{mimefor \'x\'}}">\n'],
   ])('quotes an unquoted value that holds one quote kind: %j', async (source, expected) => {
-    expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] })).toBe(expected);
+    expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin] })).toBe(expected);
   });
 
   /* The block scanner reads raw text looking for `{{/name}}`, so what it must and must not step
@@ -113,7 +113,7 @@ describe('malformed templates are rejected', () => {
     ['an open delimiter in a string literal', "{{#if (eq a '{{')}}x{{/if}}"],
     ['a close delimiter in a string literal', "{{#if (eq a '}}')}}x{{/if}}"],
   ])('accepts %s', async (_name, source) => {
-    expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] })).toBe(`${source}\n`);
+    expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin] })).toBe(`${source}\n`);
   });
 
   it.each([
@@ -135,7 +135,7 @@ describe('malformed templates are rejected', () => {
     ['<script>var s = "</scriptx>";</script>', '<script>var s = "</scriptx>";</script>\n'],
     ['<script>a</SCRIPT>', '<script>a</SCRIPT>\n'],
   ])('accepts %j, as a browser does', async (source, expected) => {
-    expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] })).toBe(expected);
+    expect(await prettier.format(source, { parser: 'handlebars', plugins: [plugin] })).toBe(expected);
   });
 
   /* The close tag's name has to end where the open tag's does. Comparing only its first
@@ -211,7 +211,7 @@ describe('the escape hatches still work', () => {
     const source = '{{! prettier-ignore-start }}\n<div>oops\n{{! prettier-ignore-end }}\n<p>x</p>';
 
     await expect(
-      prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] }),
+      prettier.format(source, { parser: 'handlebars', plugins: [plugin] }),
     ).resolves.toBe(`${source}\n`);
   });
 
@@ -219,7 +219,7 @@ describe('the escape hatches still work', () => {
     const source = '{{! prettier-ignore }}\n<div    a=1>x</div>';
 
     await expect(
-      prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] }),
+      prettier.format(source, { parser: 'handlebars', plugins: [plugin] }),
     ).resolves.toBe(`${source}\n`);
   });
 
@@ -234,7 +234,7 @@ describe('the escape hatches still work', () => {
     const source = `<div>\n{{!-- prettier-ignore-start --}}\n${markup}\n{{!-- prettier-ignore-end --}}\n</div>`;
 
     await expect(
-      prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] }),
+      prettier.format(source, { parser: 'handlebars', plugins: [plugin] }),
     ).resolves.toContain(markup);
   });
 
@@ -245,7 +245,7 @@ describe('the escape hatches still work', () => {
     'treats %j as an ordinary comment',
     async (comment) => {
       await expect(
-        prettier.format(`${comment}\n<div    a=1>x</div>`, { parser: 'handlebars', plugins: [plugin as never] }),
+        prettier.format(`${comment}\n<div    a=1>x</div>`, { parser: 'handlebars', plugins: [plugin] }),
       ).resolves.toBe(`${comment}\n<div a="1">x</div>\n`);
     },
   );
@@ -280,7 +280,7 @@ describe('prettier surfaces the failure', () => {
   it('renders a code frame pointing at the offending line', async () => {
     const attempt = prettier.format('<div>\n  <span>y\n</div>', {
       parser: 'handlebars',
-      plugins: [plugin as never],
+      plugins: [plugin],
     });
 
     await expect(attempt).rejects.toThrow(/unclosed tag: expected <\/span> \(2:3\)/u);
@@ -339,7 +339,7 @@ describe('prettier-ignore is a directive, not a word', () => {
   it('ignores a comment that merely mentions it', async () => {
     const output = await prettier.format("{{!-- do not add prettier-ignore here --}}\n<div   a='1'></div>", {
       parser: 'handlebars',
-      plugins: [plugin as never],
+      plugins: [plugin],
     });
 
     expect(output).toBe('{{!-- do not add prettier-ignore here --}}\n<div a="1"></div>\n');
@@ -349,7 +349,7 @@ describe('prettier-ignore is a directive, not a word', () => {
     const source = '{{! prettier-ignore }}\n<div   a=1>x</div>';
 
     await expect(
-      prettier.format(source, { parser: 'handlebars', plugins: [plugin as never] }),
+      prettier.format(source, { parser: 'handlebars', plugins: [plugin] }),
     ).resolves.toBe(`${source}\n`);
   });
 });

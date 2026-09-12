@@ -25,40 +25,54 @@ export type RenderDifference =
 const HTML_WHITESPACE = /[ \t\r\n\f]/u;
 const HTML_WHITESPACE_RUN = /[ \t\r\n\f]+/gu;
 
+/* Handlebars' own visitor knows the shape of its own tree, so this states which nodes matter
+ * rather than how to reach them. `Hash` still calls up, or the pairs' values go unvisited and a
+ * literal written inside one is missed. */
+class PartialFactsVisitor extends Handlebars.Visitor {
+  readonly literals = new Set<string>();
+  readonly hashKeys = new Set<string>();
+
+  override StringLiteral(node: hbs.AST.StringLiteral): void {
+    this.literals.add(node.value);
+  }
+
+  override Hash(hash: hbs.AST.Hash): void {
+    for (const pair of hash.pairs) this.hashKeys.add(pair.key);
+
+    super.Hash(hash);
+  }
+}
+
 /* Every string literal in a template, via Handlebars' parser. Returns nothing for a source it
  * cannot parse - the malformed corpus - which is fine: those are never rendered anyway. */
 function partialFactsOf(source: string): PartialFacts {
-  const literals = new Set<string>();
-  const hashKeys = new Set<string>();
-  let ast;
+  const visitor = new PartialFactsVisitor();
 
   try {
-    ast = Handlebars.parse(source);
+    visitor.accept(Handlebars.parse(source));
   } catch {
-    return { literals, hashKeys };
+    return { literals: new Set(), hashKeys: new Set() };
   }
 
-  const walk = (node: any): void => {
-    if (Array.isArray(node)) return node.forEach(walk);
-    if (!node || typeof node !== 'object') return;
-    if (node.type === 'StringLiteral' && typeof node.value === 'string') literals.add(node.value);
-    for (const pair of node.hash?.pairs ?? []) hashKeys.add(pair.key);
-
-    for (const [key, value] of Object.entries(node)) {
-      if (key !== 'loc') walk(value);
-    }
-  };
-
-  walk(ast);
-  return { literals, hashKeys };
+  return { literals: visitor.literals, hashKeys: visitor.hashKeys };
 }
+
+/**
+ * The two bodies a helper may be given, both optional: `helperMissing` is handed neither unless
+ * the missing helper was written as a block. `HelperOptions` declares both required, which is
+ * true of a builtin and not of this.
+ */
+type BranchOptions = Partial<Pick<Handlebars.HelperOptions, Branch>>;
+
+/** What Handlebars puts last for `helperMissing`: the call's options, plus the name it missed. */
+type MissingHelperOptions = BranchOptions & { name: string };
 
 function environment(source: string, branch: Branch, facts: PartialFacts) {
   const env = Handlebars.create();
 
   /* Branch by fiat, not by data: every conditional body gets rendered on one pass or the other,
    * so a defect hiding in an `{{else}}` is still visible. */
-  const take = function (this: unknown, _context: unknown, options: Handlebars.HelperOptions) {
+  const take = function (this: unknown, _context: unknown, options: BranchOptions) {
     const body = options[branch];
     /* Block params have to be supplied even though nothing reads them: `{{#each xs as |a b|}}`
      * makes Handlebars index into the array the caller was supposed to pass, and without one it
@@ -69,8 +83,12 @@ function environment(source: string, branch: Branch, facts: PartialFacts) {
 
   for (const name of ['if', 'unless', 'each', 'with']) env.registerHelper(name, take);
   env.registerHelper('blockHelperMissing', take);
-  env.registerHelper('helperMissing', function (this: unknown, ...args: any[]) {
-    const options = args[args.length - 1];
+  /* Handlebars passes the call's arguments and puts the options last. A rest parameter cannot
+   * say "the last of these is the options", so it is asserted once here rather than re-guessed
+   * at every use. */
+  env.registerHelper('helperMissing', function (this: unknown, ...args: unknown[]) {
+    const options = args[args.length - 1] as MissingHelperOptions;
+
     return options.fn ? take.call(this, null, options) : `[${options.name}]`;
   });
 

@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parse } from '../src/parser';
-// @ts-expect-error
 import { findTilingViolations } from './lib/ast-invariants.mts';
-import type { ElementNode, Node, TextNode } from '../src/types';
+import type { ElementNode, Node } from '../src/types';
 
 function textChars(nodes: Node[]): Array<string | null> {
   return nodes.map((node) => (node.type === 'TextNode' ? node.chars : null));

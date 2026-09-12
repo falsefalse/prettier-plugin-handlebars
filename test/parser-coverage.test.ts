@@ -2,42 +2,30 @@ import { describe, expect, it } from 'vitest';
 import { locEnd, locStart } from '../src/core/source';
 import { parse as parseTemplate } from '../src/parser';
 import { flattenCalls, type Flat } from './lib/call-shape';
+import { ofType } from './lib/narrow';
 
 /* Calls read as strings here; expression.test.ts covers the node shape. */
 const parse = (source: string) => flattenCalls(parseTemplate(source));
-import type {
-  BlockStatement,
-  CommentStatement,
-  DecoratorStatement,
-  ElementAttribute,
-  ElementNode,
-  MustacheStatement,
-  PartialStatement,
-  Program,
-  TextNode,
-  UnmatchedNode,
-} from '../src/types';
+import type { Node, Program } from '../src/types';
 
 function parseProgram(source: string): Flat<Program> {
   return parse(source);
 }
 
-function firstNode<T>(source: string): T {
-  return parseProgram(source).body[0] as T;
+function firstNode<T extends Flat<Node>['type']>(source: string, type: T) {
+  return ofType(parseProgram(source).body[0], type);
 }
 
-function firstElement(source: string): ElementNode {
-  const element = firstNode<ElementNode>(source);
-  expect(element.type).toBe('ElementNode');
-  return element;
+function firstElement(source: string) {
+  return firstNode(source, 'ElementNode');
 }
 
 describe('simple parser coverage', () => {
   it('tracks non-enumerable source ranges for Prettier location hooks', () => {
     const program = parseProgram('<div>Hello, {{name}}!</div>');
-    const element = program.body[0] as ElementNode;
-    const text = element.children[0] as TextNode;
-    const mustache = element.children[1] as MustacheStatement;
+    const element = ofType(program.body[0], 'ElementNode');
+    const text = ofType(element.children[0], 'TextNode');
+    const mustache = ofType(element.children[1], 'MustacheStatement');
 
     expect(locStart(program)).toBe(0);
     expect(locEnd(program)).toBe(27);
@@ -58,7 +46,7 @@ describe('simple parser coverage', () => {
       throw new Error('Expected title attribute value');
     }
 
-    const mustache = attr.value.parts[1] as MustacheStatement;
+    const mustache = ofType(attr.value.parts[1], 'MustacheStatement');
 
     expect(locStart(attr.value)).toBe(12);
     expect(locEnd(attr.value)).toBe(23);
@@ -68,7 +56,7 @@ describe('simple parser coverage', () => {
   });
 
   it('parses short handlebars comments at the top level', () => {
-    const comment = firstNode<CommentStatement>('{{! note}}');
+    const comment = firstNode('{{! note}}', 'CommentStatement');
 
     expect(comment).toMatchObject({
       type: 'CommentStatement',
@@ -79,7 +67,7 @@ describe('simple parser coverage', () => {
   });
 
   it('parses triple-stash expressions', () => {
-    const mustache = firstNode<MustacheStatement>('{{{ html }}}');
+    const mustache = firstNode('{{{ html }}}', 'MustacheStatement');
 
     expect(mustache).toMatchObject({
       type: 'MustacheStatement',
@@ -91,7 +79,7 @@ describe('simple parser coverage', () => {
   });
 
   it('keeps escaped mustaches as text', () => {
-    const text = firstNode<TextNode>('\\{{value}}');
+    const text = firstNode('\\{{value}}', 'TextNode');
 
     expect(text).toMatchObject({
       type: 'TextNode',
@@ -100,7 +88,7 @@ describe('simple parser coverage', () => {
   });
 
   it('parses inverse sections as block statements', () => {
-    const block = firstNode<BlockStatement>('{{^items}}empty{{/items}}');
+    const block = firstNode('{{^items}}empty{{/items}}', 'BlockStatement');
 
     expect(block).toMatchObject({
       type: 'BlockStatement',
@@ -110,7 +98,7 @@ describe('simple parser coverage', () => {
   });
 
   it('does not close mustaches on braces inside quoted params', () => {
-    const mustache = firstNode<MustacheStatement>('{{helper "a }} b" value}}');
+    const mustache = firstNode('{{helper "a }} b" value}}', 'MustacheStatement');
 
     expect(mustache).toMatchObject({
       type: 'MustacheStatement',
@@ -120,7 +108,7 @@ describe('simple parser coverage', () => {
   });
 
   it('keeps escaped quotes inside quoted params', () => {
-    const mustache = firstNode<MustacheStatement>(String.raw`{{helper "a \"b\" c" value}}`);
+    const mustache = firstNode(String.raw`{{helper "a \"b\" c" value}}`, 'MustacheStatement');
 
     expect(mustache).toMatchObject({
       type: 'MustacheStatement',
@@ -130,7 +118,7 @@ describe('simple parser coverage', () => {
   });
 
   it('parses partials with hash pairs', () => {
-    const partial = firstNode<PartialStatement>("{{> card title=title featured=true}}");
+    const partial = firstNode("{{> card title=title featured=true}}", 'PartialStatement');
 
     expect(partial).toMatchObject({
       type: 'PartialStatement',
@@ -144,7 +132,7 @@ describe('simple parser coverage', () => {
   });
 
   it('parses standalone decorators with params and hash pairs', () => {
-    const decorator = firstNode<DecoratorStatement>('{{*log value level="debug"}}');
+    const decorator = firstNode('{{*log value level="debug"}}', 'DecoratorStatement');
 
     expect(decorator).toMatchObject({
       type: 'DecoratorStatement',
@@ -222,8 +210,9 @@ describe('simple parser coverage', () => {
 
 describe('medium parser coverage', () => {
   it('parses blocks with inverse branches and block params', () => {
-    const block = firstNode<BlockStatement>(
+    const block = firstNode(
       '{{#each items as |item idx|}}<span>{{ item }}</span>{{else}}<em>Empty</em>{{/each}}',
+      'BlockStatement',
     );
 
     expect(block).toMatchObject({
@@ -235,11 +224,11 @@ describe('medium parser coverage', () => {
 
     expect(block.program.body).toHaveLength(1);
     expect(block.inverse.body).toHaveLength(1);
-    expect((block.inverse.body[0] as ElementNode).tag).toBe('em');
+    expect(ofType(block.inverse.body[0], 'ElementNode').tag).toBe('em');
   });
 
   it('tracks trim markers on final else branches', () => {
-    const block = firstNode<BlockStatement>('{{#if ok}}A{{~else~}}B{{/if}}');
+    const block = firstNode('{{#if ok}}A{{~else~}}B{{/if}}', 'BlockStatement');
 
     expect(block.inverseTrimOpen).toBe(true);
     expect(block.inverseTrimClose).toBe(true);
@@ -247,7 +236,7 @@ describe('medium parser coverage', () => {
 
   it('parses html comments inside elements as verbatim text nodes', () => {
     const element = firstElement('<div><!-- keep --><span>{{ value }}</span></div>');
-    const comment = element.children[0] as TextNode;
+    const comment = ofType(element.children[0], 'TextNode');
 
     expect(comment).toMatchObject({
       type: 'TextNode',
@@ -255,11 +244,11 @@ describe('medium parser coverage', () => {
       verbatim: true,
     });
 
-    expect((element.children[1] as ElementNode).tag).toBe('span');
+    expect(ofType(element.children[1], 'ElementNode').tag).toBe('span');
   });
 
   it('keeps handlebars-looking expressions inside handlebars comments as comment text', () => {
-    const comment = firstNode<CommentStatement>('{{!-- <span>{{ price }}</span> --}}');
+    const comment = firstNode('{{!-- <span>{{ price }}</span> --}}', 'CommentStatement');
 
     expect(comment).toMatchObject({
       type: 'CommentStatement',
@@ -270,7 +259,7 @@ describe('medium parser coverage', () => {
 
   it('parses style contents as a single verbatim child', () => {
     const style = firstElement('<style>\n  .x { color: red; }\n</style>');
-    const child = style.children[0] as TextNode;
+    const child = ofType(style.children[0], 'TextNode');
 
     expect(style.tag).toBe('style');
     expect(style.children).toHaveLength(1);
@@ -283,7 +272,7 @@ describe('medium parser coverage', () => {
 
   it('parses comment blocks in opening tags as attribute blocks', () => {
     const element = firstElement('<div {{!-- note --}} hidden></div>');
-    const attrBlock = element.attributes[0] as Extract<ElementAttribute, { type: 'AttributeBlock' }>;
+    const attrBlock = ofType(element.attributes[0], 'AttributeBlock');
 
     expect(attrBlock).toMatchObject({
       type: 'AttributeBlock',

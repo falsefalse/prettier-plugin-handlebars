@@ -99,7 +99,8 @@ function childrenOf(node: Node): Node[] {
   return children;
 }
 
-function walk(node: Node, visit: (node: Node) => void): void {
+/** Every node under this one, attribute values and blocks in attribute position included. */
+export function walk(node: Node, visit: (node: Node) => void): void {
   visit(node);
 
   for (const child of childrenOf(node)) {
