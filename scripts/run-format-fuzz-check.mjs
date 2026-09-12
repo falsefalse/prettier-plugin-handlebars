@@ -4,8 +4,7 @@
 import prettier from 'prettier';
 import * as plugin from '../dist/plugin.js';
 import { TemplateSyntaxError } from '../dist/core/errors.js';
-import { parse } from '../dist/parser.js';
-import { literalValues } from '../test/lib/ast-invariants.mts';
+import { templateFacts } from '../test/lib/handlebars-facts.mts';
 import { renderDifference } from '../test/lib/render.mts';
 import { fuzzCasesFromEnv, malformed } from './lib/fuzz-cases.mjs';
 
@@ -13,6 +12,7 @@ const { cases, seed } = fuzzCasesFromEnv();
 const failures = [];
 
 let renderCompared = 0;
+let literalsCompared = 0;
 
 for (const testCase of cases) {
   try {
@@ -37,13 +37,29 @@ for (const testCase of cases) {
       });
     }
 
-    /* Re-quoting a literal must not change what it holds. Rendering misses this whenever the
-     * value never reaches the page - a partial name, a helper the harness has no binding for. */
-    const before = literalValues(parse(testCase.source));
-    const after = literalValues(parse(firstPass));
+/* Re-quoting a literal must not change what it holds, according to Handlebars rather than to
+     * this plugin. Rendering misses this whenever the value never reaches the page - a partial
+     * name, a helper the harness has no binding for. */
+    const before = templateFacts(testCase.source);
+    const after = templateFacts(firstPass);
 
-    if (before.join('\u0000') !== after.join('\u0000')) {
-      failures.push({ id: testCase.id, type: 'literal-changed', source: testCase.source, firstPass, before, after });
+    /* A side Handlebars cannot read is a case this gate did not check: comparing two empty
+     * fact sets reports agreement, which is how the check would go vacuous unnoticed. */
+    if (!before || !after) {
+      failures.push({ id: testCase.id, type: 'unparseable', source: testCase.source, firstPass });
+    } else {
+      literalsCompared += 1;
+
+      if (before.literals.join('\u0000') !== after.literals.join('\u0000')) {
+        failures.push({
+          id: testCase.id,
+          type: 'literal-changed',
+          source: testCase.source,
+          firstPass,
+          before: before.literals,
+          after: after.literals,
+        });
+      }
     }
 
     /* Content changes only: the generator emits one-line soup that has to wrap, so a sibling
@@ -133,5 +149,5 @@ if (failures.length > 0) {
  * own coverage goes vacuous unnoticed. */
 console.log(
   `Format fuzz check passed: ${cases.length} formatted, ${renderCompared} render-compared, ` +
-    `${malformed.length} refused, seed=${seed}.`,
+    `${literalsCompared} literal-compared, ${malformed.length} refused, seed=${seed}.`,
 );

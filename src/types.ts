@@ -35,6 +35,9 @@ export type AttributeBlockNode =
 
 export type AttributeValuePart = TextNode | AttributeBlockNode;
 
+/** How a block opens, which is also how its closer and its `{{else}}` are spelled. */
+export type BlockPrefix = '#' | '#>' | '#*' | '^' | '<' | '$';
+
 /**
  * `glued` marks an attribute the author wrote with no space before it. For a mustache or block in
  * attribute position that space renders, so the printer may not invent one.
@@ -152,7 +155,7 @@ export interface BlockStatement extends MustacheBase, SourceRange {
   inverse: Program;
   inverseTrimOpen?: boolean;
   inverseTrimClose?: boolean;
-  blockPrefix?: '#' | '#>' | '#*' | '^' | '<' | '$';
+  blockPrefix?: BlockPrefix;
   closeTrimOpen?: boolean;
   closeTrimClose?: boolean;
 }

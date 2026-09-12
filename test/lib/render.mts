@@ -6,6 +6,7 @@
  * conditional builtins are overridden to take a fixed branch rather than consult the data. That
  * makes rendering total over arbitrary input, which is what lets the fuzz corpus drive it. */
 import Handlebars from 'handlebars';
+import { templateFacts } from './handlebars-facts.mts';
 
 type Branch = 'fn' | 'inverse';
 const BRANCHES: Branch[] = ['fn', 'inverse'];
@@ -25,36 +26,13 @@ export type RenderDifference =
 const HTML_WHITESPACE = /[ \t\r\n\f]/u;
 const HTML_WHITESPACE_RUN = /[ \t\r\n\f]+/gu;
 
-/* Handlebars' own visitor knows the shape of its own tree, so this states which nodes matter
- * rather than how to reach them. `Hash` still calls up, or the pairs' values go unvisited and a
- * literal written inside one is missed. */
-class PartialFactsVisitor extends Handlebars.Visitor {
-  readonly literals = new Set<string>();
-  readonly hashKeys = new Set<string>();
-
-  override StringLiteral(node: hbs.AST.StringLiteral): void {
-    this.literals.add(node.value);
-  }
-
-  override Hash(hash: hbs.AST.Hash): void {
-    for (const pair of hash.pairs) this.hashKeys.add(pair.key);
-
-    super.Hash(hash);
-  }
-}
-
-/* Every string literal in a template, via Handlebars' parser. Returns nothing for a source it
- * cannot parse - the malformed corpus - which is fine: those are never rendered anyway. */
+/* Deduplicated here and nowhere else: a partial is registered once per name, while the format
+ * gate needs them in order. Nothing for a source Handlebars cannot parse - the malformed corpus
+ * - which is fine, those are never rendered anyway. */
 function partialFactsOf(source: string): PartialFacts {
-  const visitor = new PartialFactsVisitor();
+  const facts = templateFacts(source);
 
-  try {
-    visitor.accept(Handlebars.parse(source));
-  } catch {
-    return { literals: new Set(), hashKeys: new Set() };
-  }
-
-  return { literals: visitor.literals, hashKeys: visitor.hashKeys };
+  return { literals: new Set(facts?.literals), hashKeys: new Set(facts?.hashKeys) };
 }
 
 /**
