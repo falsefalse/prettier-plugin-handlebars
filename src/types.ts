@@ -185,5 +185,3 @@ export interface UnmatchedNode extends SourceRange {
   /** As on `TextNode`: in a value the trailing gap is content, not somewhere to break. */
   preserveWhitespace?: boolean;
 }
-
-export type ParseEndReason = 'blockEnd' | 'else' | 'tagClose' | null;

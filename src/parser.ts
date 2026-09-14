@@ -7,7 +7,6 @@ import {
   ElementAttribute,
   BlockStatement,
   ElseBranch,
-  ParseEndReason,
 } from './types';
 import { isRawTextElement, isVoidElement } from './core/html';
 import { normalizeInput, withOptionalRange, withRange } from './core/source';
@@ -60,16 +59,20 @@ import {
   parseMustacheToken,
 } from './dialects/handlebars/tokens';
 
-interface ParseResult {
-  nodes: Node[];
-  position: number;
-  endReason: ParseEndReason;
-  endToken?: MustacheToken;
-  /** Where the terminator starts, i.e. where the children's content span ends. */
-  contentEnd?: number;
-  /** How the author spelled the closing tag, which need not match the opening one's case. */
-  closeTag?: string;
-}
+/* What ended a child list decides what else is known about it: a closing tag has a spelling and
+ * marks where the content ended, a block's terminator is a token, and running out of input
+ * leaves nothing. Saying so in the type is what lets a caller read those without a fallback. */
+type ParseResult = { nodes: Node[]; position: number } & (
+  | { endReason: null }
+  | {
+      endReason: 'tagClose';
+      /** Where the closing tag starts, i.e. where the children's content span ends. */
+      contentEnd: number;
+      /** How the author spelled the closing tag, which need not match the opening one's case. */
+      closeTag: string;
+    }
+  | { endReason: 'blockEnd' | 'else'; endToken: MustacheToken }
+);
 
 export function parse(text: string): Program {
   const normalizedText = normalizeInput(text);
@@ -166,17 +169,21 @@ function parseRawTextChildren(text: string, position: number, endTag: string, ra
   const contentEnd = closeStart >= 0 ? closeStart : text.length;
   const nodes: Node[] = contentEnd > position ? [textNode(text, position, contentEnd, rangeOffset, true)] : [];
 
-  const closeIdx = closeStart >= 0 ? text.indexOf('>', closeStart) : -1;
-  if (closeStart >= 0 && closeIdx < 0) {
+  if (closeStart < 0) {
+    return { nodes, position: contentEnd, endReason: null };
+  }
+
+  const closeIdx = text.indexOf('>', closeStart);
+  if (closeIdx < 0) {
     fail("unterminated tag: expected '>'", rangeOffset + closeStart, rangeOffset + text.length);
   }
 
   return {
     nodes,
-    position: closeIdx >= 0 ? closeIdx + 1 : contentEnd,
-    endReason: closeStart >= 0 ? 'tagClose' : null,
+    position: closeIdx + 1,
+    endReason: 'tagClose',
     contentEnd,
-    closeTag: closeStart >= 0 ? readCloseTagSource(text, closeStart, closeIdx) : undefined,
+    closeTag: readCloseTagSource(text, closeStart, closeIdx),
   };
 }
 
@@ -382,14 +389,8 @@ function parseElement(
     fail(`unclosed tag: expected </${tagResult.tag}>`, rangeOffset + pos, rangeOffset + tagResult.end);
   }
 
-  const {
-    nodes: children,
-    position: newPos,
-    endReason: childEndReason,
-    contentEnd,
-    closeTag,
-  } = parseChildren(text, tagResult.end, tagResult.tag, null, rangeOffset);
-  if (childEndReason !== 'tagClose') {
+  const result = parseChildren(text, tagResult.end, tagResult.tag, null, rangeOffset);
+  if (result.endReason !== 'tagClose') {
     fail(`unclosed tag: expected </${tagResult.tag}>`, rangeOffset + pos, rangeOffset + tagResult.end);
   }
 
@@ -399,17 +400,17 @@ function parseElement(
         type: 'ElementNode',
         tag: tagResult.tag,
         attributes: tagResult.attributes,
-        children,
+        children: result.nodes,
         selfClosing: false,
-        ...(closeTag && closeTag !== tagResult.tag ? { closeTag } : {}),
+        ...(result.closeTag !== tagResult.tag ? { closeTag: result.closeTag } : {}),
         attributesRange: tagResult.attributesRange,
-        contentRange: [rangeOffset + tagResult.end, rangeOffset + (contentEnd ?? newPos)],
+        contentRange: [rangeOffset + tagResult.end, rangeOffset + result.contentEnd],
       },
       rangeOffset + pos,
-      rangeOffset + newPos,
+      rangeOffset + result.position,
     ),
   );
-  return newPos;
+  return result.position;
 }
 
 function parseBlock(
@@ -427,54 +428,52 @@ function parseBlock(
   /* Every branch reads to the same terminator - this block's own closer - so they differ only
    * in where they start. */
   const parseBranch = (from: number) => parseChildren(text, from, null, openInfo.path.source, rangeOffset);
-
-  const { nodes: program, position: afterProgram, endReason, endToken } = parseBranch(token.end);
+  /* A body ends where its terminator begins, not after it, so the program tiles the range; with
+   * no terminator it ends with the input. */
+  const bodyEnd = (result: ParseResult): number =>
+    result.endReason === 'blockEnd' || result.endReason === 'else' ? result.endToken.start : result.position;
   const buildProgram = (nodes: Node[], start: number, end: number): Program =>
     withRange({ type: 'Program', body: nodes }, rangeOffset + start, rangeOffset + end);
-  /* A program ends where its terminator begins, not after it, so the body tiles the range. */
-  const programBody = buildProgram(program, token.end, endToken?.start ?? afterProgram);
+
+  const first = parseBranch(token.end);
+  const programBody = buildProgram(first.nodes, token.end, bodyEnd(first));
 
   /* Set only when the author wrote a bare `{{else}}`; otherwise the empty inverse is built at
    * the end, once the closer's position is known. Anchoring it at `afterProgram` up here put it
    * inside the else-if chain - a point belonging to a different section of the block. */
   let inverse: { program: Program; trimOpen: boolean; trimClose: boolean } | undefined;
   const inverseChain: ElseBranch[] = [];
-  let finalPos = afterProgram;
-  let closeToken = endReason === 'blockEnd' ? endToken : undefined;
+  let finalPos = first.position;
+  let closeToken = first.endReason === 'blockEnd' ? first.endToken : undefined;
 
-  if (endReason === 'else' && endToken) {
-    let currentElseToken: MustacheToken | undefined = endToken;
-    let currentPosition = afterProgram;
+  if (first.endReason === 'else') {
+    let currentElseToken: MustacheToken | undefined = first.endToken;
+    let currentPosition = first.position;
 
     while (currentElseToken?.specialForm === 'elseIf') {
       const branchExpression = callAt(currentElseToken, currentElseToken.content.replace(/^else\s+/, ''));
-      const {
-        nodes: branchNodes,
-        position: afterBranch,
-        endReason: branchEndReason,
-        endToken: branchEndToken,
-      } = parseBranch(currentPosition);
+      const branch = parseBranch(currentPosition);
 
       inverseChain.push(
         withRange(
           {
             type: 'ElseBranch',
-            program: buildProgram(branchNodes, currentElseToken.end, branchEndToken?.start ?? afterBranch),
+            program: buildProgram(branch.nodes, currentElseToken.end, bodyEnd(branch)),
             trimOpen: currentElseToken.trimOpen,
             trimClose: currentElseToken.trimClose,
             ...branchExpression,
           },
           rangeOffset + currentElseToken.start,
-          rangeOffset + afterBranch,
+          rangeOffset + branch.position,
         ),
       );
 
-      finalPos = afterBranch;
-      closeToken = branchEndReason === 'blockEnd' ? branchEndToken : undefined;
+      finalPos = branch.position;
+      closeToken = branch.endReason === 'blockEnd' ? branch.endToken : undefined;
 
-      if (branchEndReason === 'else' && branchEndToken) {
-        currentElseToken = branchEndToken;
-        currentPosition = afterBranch;
+      if (branch.endReason === 'else') {
+        currentElseToken = branch.endToken;
+        currentPosition = branch.position;
         continue;
       }
 
@@ -482,20 +481,15 @@ function parseBlock(
     }
 
     if (currentElseToken) {
-      const {
-        nodes: inverseNodes,
-        position: afterInverse,
-        endReason: inverseEndReason,
-        endToken: inverseEndToken,
-      } = parseBranch(currentPosition);
+      const last = parseBranch(currentPosition);
 
       inverse = {
-        program: buildProgram(inverseNodes, currentElseToken.end, inverseEndToken?.start ?? afterInverse),
+        program: buildProgram(last.nodes, currentElseToken.end, bodyEnd(last)),
         trimOpen: currentElseToken.trimOpen,
         trimClose: currentElseToken.trimClose,
       };
-      finalPos = afterInverse;
-      closeToken = inverseEndReason === 'blockEnd' ? inverseEndToken : undefined;
+      finalPos = last.position;
+      closeToken = last.endReason === 'blockEnd' ? last.endToken : undefined;
     }
   }
 
