@@ -496,19 +496,6 @@ function withCloser(content: Piece[], closer: Doc): Piece[] {
   return [...content, { kind: 'doc', doc: closer }];
 }
 
-/* Containers thread the marker into their body; everything else just carries it along. */
-function printWithTail(node: Node, options: PrintOptions, tail: Doc): Doc {
-  if (node.type === 'ElementNode') {
-    return printElement(node, options, tail);
-  }
-
-  if (node.type === 'BlockStatement') {
-    return printBlock(node, options, tail);
-  }
-
-  return [printAny(node, options), tail];
-}
-
 function printElement(node: ElementNode, options: PrintOptions, tail: Doc = []): Doc {
   const openTag = printOpenTag(node, options);
   const closer: Doc = ['</', node.closeTag ?? node.tag, '>', tail];
@@ -628,7 +615,7 @@ function childPieces(nodes: Node[], options: PrintOptions): Piece[] {
       sensitive.push(pieces.length);
     }
 
-    pieces.push(tailable((tail) => printWithTail(child, options, tail)));
+    pieces.push(tailable((tail) => printAny(child, options, tail)));
   }
 
   for (const at of sensitive) {
@@ -657,38 +644,40 @@ function printRoot(nodes: Node[], options: PrintOptions): Doc {
  * The printer recurses over nodes directly rather than through prettier's AstPath. It makes no
  * parent-dependent decisions - a node's shape is a function of the node alone - so the path
  * buys nothing, and dropping it keeps every signature free of casts.
+ *
+ * Containers thread the `tail` marker into their body; everything else just carries it along.
  */
-function printAny(node: Node, options: PrintOptions): Doc {
+function printAny(node: Node, options: PrintOptions, tail: Doc = []): Doc {
   switch (node.type) {
+    case 'ElementNode':
+      return printElement(node, options, tail);
+
+    case 'BlockStatement':
+      return printBlock(node, options, tail);
+
     case 'Program':
-      return assemble(childPieces(node.body, options));
+      return [assemble(childPieces(node.body, options)), tail];
 
     case 'TextNode':
-      return assemble(textPieces(node));
+      return [assemble(textPieces(node)), tail];
 
     case 'MustacheStatement':
-      return printStatement(node, '', options);
+      return [printStatement(node, '', options), tail];
 
     case 'PartialStatement':
-      return printStatement(node, '> ', options);
+      return [printStatement(node, '> ', options), tail];
 
     case 'DecoratorStatement':
-      return printStatement(node, '*', options);
+      return [printStatement(node, '*', options), tail];
 
     case 'CommentStatement':
-      return printComment(node);
+      return [printComment(node), tail];
 
     /* `childPieces` intercepts these, so this arm only keeps the switch exhaustive. It goes
      * through `unmatchedPieces` all the same, rather than repeating it: a second copy drifts,
      * and one missing the trailing-whitespace split grows the file by a newline every pass. */
     case 'UnmatchedNode':
-      return assemble(unmatchedPieces(node));
-
-    case 'ElementNode':
-      return printElement(node, options);
-
-    case 'BlockStatement':
-      return printBlock(node, options);
+      return [assemble(unmatchedPieces(node)), tail];
   }
 }
 
