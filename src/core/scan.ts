@@ -29,7 +29,7 @@ export function scanPastQuotes(
       continue;
     }
 
-    if ((char === '"' || char === "'" || char === '`') && opensQuote(index)) {
+    if ((char === '"' || char === "'") && opensQuote(index)) {
       quote = char;
       continue;
     }

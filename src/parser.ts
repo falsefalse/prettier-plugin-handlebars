@@ -24,6 +24,7 @@ import {
   skipWhitespace,
   startsCloseTag,
   startsTemplateTag,
+  tagKind,
   trimTrailingWhitespace,
 } from './parse/lex';
 import type { ParsedTag } from './parse/lex';
@@ -57,7 +58,6 @@ import {
   getBlockPrefix,
   isHandlebarsBlockComment,
   parseMustacheToken,
-  shouldPreserveMustacheVerbatim,
 } from './dialects/handlebars/tokens';
 
 interface ParseResult {
@@ -202,7 +202,8 @@ function parseMustacheChild(
     fail(`unterminated ${open}: expected ${close}`, rangeOffset + pos, rangeOffset + token.end);
   }
 
-  if (shouldPreserveMustacheVerbatim(token) && !(endBlock && token.kind === 'else')) {
+  /* An `{{else if}}` with nothing open stands for nothing on its own, so it is kept verbatim. */
+  if (token.specialForm === 'elseIf' && !endBlock) {
     nodes.push(createUnmatchedNode(text, pos, token.end, rangeOffset));
     return token.end;
   }
@@ -249,11 +250,14 @@ function parseMustacheChild(
   }
 
   if (token.kind === 'blockStart') {
+    /* Before the body is parsed, so the message names this block and not whatever fails first
+     * inside it. */
     if (!hasMatchingBlockEnd(text, token)) {
       fail(`unclosed block: expected {{/${token.name ?? ''}}}`, rangeOffset + pos, rangeOffset + token.end);
     }
 
     const { node, next, closed } = parseBlock(text, token, rangeOffset);
+    /* Still reachable: a `prettier-ignore` region can swallow the closer the lookahead saw. */
     if (!closed) {
       fail(`unclosed block: expected {{/${token.name ?? ''}}}`, rangeOffset + pos, rangeOffset + token.end);
     }
@@ -567,9 +571,6 @@ function parseTag(text: string, position: number, rangeOffset: number): ParsedTa
   const attributes: ElementAttribute[] = [];
   const headStart = pos;
   const span = (headEnd: number): [number, number] => [rangeOffset + headStart, rangeOffset + headEnd];
-  /* A void element is self-closing however it was written, so `<br>` and `<br/>` agree. */
-  const kindOf = (selfClosed: boolean): 'open' | 'selfClosing' =>
-    selfClosed || isVoidElement(tag) ? 'selfClosing' : 'open';
   let glued = false;
   let attrStart = pos;
 
@@ -623,7 +624,7 @@ function parseTag(text: string, position: number, rangeOffset: number): ParsedTa
     if (selfClosed || text[pos] === '>') {
       const headEnd = pos;
       pos += selfClosed ? 2 : 1;
-      return { kind: kindOf(selfClosed), tag, attributes, attributesRange: span(headEnd), end: pos, terminated: true };
+      return { kind: tagKind(tag, selfClosed), tag, attributes, attributesRange: span(headEnd), end: pos, terminated: true };
     }
 
     const attr = parseAttribute(text, pos, rangeOffset);
@@ -638,7 +639,7 @@ function parseTag(text: string, position: number, rangeOffset: number): ParsedTa
     pos = attr.position;
   }
 
-  return { kind: kindOf(false), tag, attributes, attributesRange: span(pos), end: pos, terminated: false };
+  return { kind: tagKind(tag, false), tag, attributes, attributesRange: span(pos), end: pos, terminated: false };
 }
 
 function consumeInvalidVoidElementClose(text: string, position: number, tag: string): number | null {

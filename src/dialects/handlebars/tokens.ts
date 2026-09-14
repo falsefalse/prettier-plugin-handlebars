@@ -328,7 +328,3 @@ export function getBlockClosePrefix(path: string): string {
   return `/${path}`;
 }
 
-export function shouldPreserveMustacheVerbatim(token: HandlebarsToken): boolean {
-  return token.specialForm === 'elseIf';
-}
-

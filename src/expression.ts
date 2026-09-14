@@ -3,7 +3,7 @@ import { TemplateSyntaxError } from './core/errors';
 import * as whitespace from './core/whitespace';
 import type { Call, Expression, HashPair, Literal, LiteralType, PathExpression, SubExpression } from './types';
 
-const quoteCharacters = new Set(['"', "'", '`']);
+const quoteCharacters = new Set(['"', "'"]);
 const numberPattern = /^-?(?:\d+\.?\d*|\.\d+)$/u;
 
 function literalTypeOf(source: string): LiteralType | null {

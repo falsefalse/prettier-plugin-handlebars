@@ -155,7 +155,7 @@ export interface BlockStatement extends MustacheBase, SourceRange {
   inverse: Program;
   inverseTrimOpen?: boolean;
   inverseTrimClose?: boolean;
-  blockPrefix?: BlockPrefix;
+  blockPrefix: BlockPrefix;
   closeTrimOpen?: boolean;
   closeTrimClose?: boolean;
 }

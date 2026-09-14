@@ -24,6 +24,19 @@ export function startsTemplateTag(text: string, position: number): boolean {
 }
 
 /**
+ * Past the mustache at `position`. A token reporting an end at or before where it started would
+ * leave the caller's loop standing still, so the opening delimiter is the smallest step taken.
+ */
+export function skipTemplateTag(text: string, position: number): number {
+  return Math.max(parseMustacheToken(text, position).end, position + 2);
+}
+
+/** A void element is self-closing however it was written, so `<br>` and `<br/>` agree. */
+export function tagKind(tag: string, selfClosed: boolean): 'open' | 'selfClosing' {
+  return selfClosed || isVoidElement(tag) ? 'selfClosing' : 'open';
+}
+
+/**
  * Where a tag ends, what it is called and whether it closed - without building a single node and
  * without rejecting anything.
  *
@@ -32,14 +45,6 @@ export function startsTemplateTag(text: string, position: number): boolean {
  * was written to protect. `terminated` is false when the tag ran to EOF, which is also how an
  * unterminated attribute value shows up.
  */
-/**
- * Past the mustache at `position`. A token reporting an end at or before where it started would
- * leave the caller's loop standing still, so the opening delimiter is the smallest step taken.
- */
-export function skipTemplateTag(text: string, position: number): number {
-  return Math.max(parseMustacheToken(text, position).end, position + 2);
-}
-
 export function scanTag(
   text: string,
   position: number,
@@ -53,13 +58,7 @@ export function scanTag(
   const { value: tag, next } = readName(text, pos);
   pos = next;
 
-  const kindAt = (selfClosed: boolean): ParsedTag['kind'] => {
-    if (closing) {
-      return 'close';
-    }
-
-    return selfClosed || isVoidElement(tag) ? 'selfClosing' : 'open';
-  };
+  const kindAt = (selfClosed: boolean): ParsedTag['kind'] => (closing ? 'close' : tagKind(tag, selfClosed));
 
   /* A quote only delimits a value directly after `=`, whitespace aside. Treating every quote as
    * a delimiter would make `title=a"b'c>` swallow the rest of the file hunting a closing `"`. */

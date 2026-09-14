@@ -45,7 +45,7 @@ const hardlines = (count: number): Doc[] => Array.from({ length: count }, () => 
  * than forcing every other gap in the same program to break with it. */
 type Piece =
   | { kind: 'break'; count: number }
-  | { kind: 'space'; hard?: boolean }
+  | { kind: 'space'; hard: boolean }
   /** `withTail` is set on children that can take their container's closing marker inside them. */
   | { kind: 'doc'; doc: Doc; withTail?: (tail: Doc) => Doc };
 
@@ -80,7 +80,7 @@ const trailingWhitespace = new RegExp(`${whitespace.htmlRun.source}$`, 'u');
  */
 function whitespacePiece(text: string): Piece {
   const newlines = text.split('\n').length - 1;
-  return newlines === 0 ? { kind: 'space' } : { kind: 'break', count: Math.min(newlines, MAX_HARDLINES) };
+  return newlines === 0 ? { kind: 'space', hard: false } : { kind: 'break', count: Math.min(newlines, MAX_HARDLINES) };
 }
 
 /**
@@ -196,7 +196,7 @@ function assemble(pieces: Piece[]): Doc[] {
 }
 
 /** A space the printer may wrap at, or one it may not. */
-const spaceDoc = (piece: { hard?: boolean }): Doc => (piece.hard ? ' ' : line);
+const spaceDoc = (piece: { hard: boolean }): Doc => (piece.hard ? ' ' : line);
 
 /** Every space in the run becomes one the printer may not wrap at. */
 const harden = (pieces: Piece[]): Piece[] =>
@@ -273,6 +273,28 @@ function printStatement(
   );
 }
 
+/** How many spaces or tabs a line opens with. Not `trimStart`, which also eats a U+00A0. */
+function indentOf(line: string): number {
+  let at = 0;
+  while (line[at] === ' ' || line[at] === '\t') at += 1;
+
+  return at;
+}
+
+/**
+ * Every line shifted left by the smallest indent any non-blank line carries, trailing spaces
+ * and tabs dropped. Keeps a comment body's relative shape while the printer owns its column.
+ */
+function stripCommonIndent(lines: string[]): string[] {
+  const common = lines
+    .filter((line) => line.trim() !== '')
+    .reduce((least, line) => Math.min(least, indentOf(line)), Infinity);
+
+  return lines.map((line) =>
+    line.trim() === '' ? '' : line.slice(Math.min(common, indentOf(line))).replace(/[ \t]+$/u, ''),
+  );
+}
+
 function printComment(node: CommentStatement): Doc {
   /* `block` already covers a multiline body - the parser sets it for either - so re-testing
    * `multiline` here only invited the two to be kept in step by hand. */
@@ -292,7 +314,7 @@ function printComment(node: CommentStatement): Doc {
    * the surrounding structure instead of staying frozen at the column it was written at.
    * Common indentation is stripped and re-applied, which keeps the body's *relative* shape. */
   if (/^\n/u.test(body)) {
-    const lines = whitespace.stripCommonIndent(body.replace(/^\n/u, '').replace(trailingWhitespace, '').split('\n'));
+    const lines = stripCommonIndent(body.replace(/^\n/u, '').replace(trailingWhitespace, '').split('\n'));
 
     return lines.every((line) => line === '')
       ? [open, hardline, close]
@@ -510,7 +532,7 @@ interface BlockSection {
 }
 
 function printBlock(node: BlockStatement, options: PrintOptions, tail: Doc = []): Doc {
-  const prefix = getPrintedBlockPrefix(node.blockPrefix ?? '#');
+  const prefix = getPrintedBlockPrefix(node.blockPrefix);
 
   const sections: BlockSection[] = [
     {

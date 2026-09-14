@@ -32,25 +32,3 @@ export const handlebars = /\s/u;
 
 /** `/\s+/u` - splitting a mustache's inner text into words. */
 export const handlebarsRun = /\s+/u;
-
-/** How many spaces or tabs a line opens with. Not `trimStart`, which also eats a U+00A0. */
-function indentOf(line: string): number {
-  let at = 0;
-  while (line[at] === ' ' || line[at] === '\t') at += 1;
-
-  return at;
-}
-
-/**
- * Every line shifted left by the smallest indent any non-blank line carries, trailing spaces
- * and tabs dropped. Keeps a block's relative shape while letting the printer own its column.
- */
-export function stripCommonIndent(lines: string[]): string[] {
-  const common = lines
-    .filter((line) => line.trim() !== '')
-    .reduce((least, line) => Math.min(least, indentOf(line)), Infinity);
-
-  return lines.map((line) =>
-    line.trim() === '' ? '' : line.slice(Math.min(common, indentOf(line))).replace(/[ \t]+$/u, ''),
-  );
-}

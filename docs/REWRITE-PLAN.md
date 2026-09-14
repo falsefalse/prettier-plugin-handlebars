@@ -135,8 +135,8 @@ always".
 Handlebars' own AST cannot be mirrored, because it is lossy in exactly the ways a formatter
 cannot afford: `a.[b c].d` reconstructs to `a.b c.d`, `'x'` loses its quote character, `1.50`
 becomes `1.5`. So every node carries its own `source` and prints from it. **Structure decides
-where to break; it never rewrites what the author wrote.** The single exception is string quotes,
-which `singleQuote` governs.
+where to break; it never rewrites what the author wrote.** The single exception is quotes: `"`
+around an attribute value, `'` around a string literal in a mustache.
 
 ```ts
 type Expression = PathExpression | Literal | SubExpression;
@@ -202,7 +202,8 @@ Notes on specific traps hit this session:
 
 ## 6. Options
 
-Prettier core only: `printWidth`, `tabWidth`, `useTabs`, `endOfLine`, `singleQuote`.
+Prettier core only: `printWidth`, `tabWidth`, `useTabs`, `endOfLine`. `singleQuote` is ignored:
+quoting is part of the opinion.
 All nine custom options are deleted (`dataAttributeOrder`, `maxEmptyLines`,
 `classAttributeSameLine`, `classAttributeLayout`, `attributeOrder`, `voidElementSlash`,
 `mustacheSpacing`, `commentSpacing`, `attributeBlockBreak`, `hashParamWrap`).
@@ -218,7 +219,7 @@ the target repo stays small:
 | block comments | `{{! text }}` | matches current corpus |
 | class attribute | one line unless it exceeds `printWidth` | no special case for `class` |
 | blank lines between siblings | collapse runs to at most one | prettier convention |
-| quotes | follow `singleQuote` | core option |
+| quotes | `"` for attributes, `'` for literals | opinion |
 
 ## 7. Testing
 
